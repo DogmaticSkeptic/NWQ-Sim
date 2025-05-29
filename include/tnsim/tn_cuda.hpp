@@ -247,30 +247,41 @@ namespace NWQSim
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             using namespace std::chrono;
+            using std::vector;
+            using std::accumulate;
+            using std::sqrt;
+            using std::max_element;
         
-            duration<double> c1_total(0);
-            duration<double> c2_local_total(0);
-            duration<double> c2_nonlocal_total(0);
-            duration<double> ma_total(0);
+            // Aggregates for C1 and MA
+            duration<double> c1_total(0), ma_total(0);
+            int c1_count = 0, ma_count = 0;
         
-            int c1_count = 0;
-            int c2_local_count = 0;
-            int c2_nonlocal_count = 0;
-            int ma_count = 0;
+            // Counters
+            int c2_local_count = 0, c2_nonlocal_count = 0;
+        
+            // Detailed aggregates for C2-local
+            duration<double> c2l_alloc(0), c2l_setup(0), c2l_exec(0),
+                              c2l_unpack(0), c2l_svd(0), c2l_dealloc(0);
+        
+            // Detailed aggregates for C2-nonlocal
+            duration<double> c2n_alloc(0), c2n_setup(0), c2n_exec(0),
+                              c2n_unpack(0), c2n_svd(0), c2n_dealloc(0);
+        
+            // Collect per‐invoke exec times for non-local gates
+            vector<double> c2n_exec_times;
         
             int n_gates = gates.size();
             for (int i = 0; i < n_gates; i++)
             {
-                auto g = gates[i];
+                auto &g = gates[i];
                 auto op_start = steady_clock::now();
         
                 if (g.op_name == OP::C1)
                 {
                     std::array<Cplx,4> U;
                     for (int idx = 0; idx < 4; ++idx)
-                    {
                         U[idx] = Cplx(g.gm_real[idx], g.gm_imag[idx]);
-                    }
+        
                     C1_GATE(U, g.qubit);
         
                     auto op_end = steady_clock::now();
@@ -281,22 +292,33 @@ namespace NWQSim
                 {
                     std::array<Cplx,16> U4;
                     for (int idx = 0; idx < 16; ++idx)
-                    {
                         U4[idx] = Cplx(g.gm_real[idx], g.gm_imag[idx]);
-                    }
-                    C2_GATE(U4, g.ctrl, g.qubit);
         
-                    auto op_end = steady_clock::now();
+                    C2GateTimings t = C2_GATE(U4, g.ctrl, g.qubit);
+        
                     int delta = std::abs(g.ctrl - g.qubit);
                     if (delta == 1)
                     {
-                        c2_local_total += duration_cast<duration<double>>(op_end - op_start);
                         ++c2_local_count;
+                        c2l_alloc   += duration<double>(t.allocation_time);
+                        c2l_setup   += duration<double>(t.scheduler_setup_time);
+                        c2l_exec    += duration<double>(t.scheduler_execution_time);
+                        c2l_unpack  += duration<double>(t.unpack_eigen_time);
+                        c2l_svd     += duration<double>(t.svd_time);
+                        c2l_dealloc += duration<double>(t.deallocation_time);
                     }
                     else
                     {
-                        c2_nonlocal_total += duration_cast<duration<double>>(op_end - op_start);
                         ++c2_nonlocal_count;
+                        c2n_alloc   += duration<double>(t.allocation_time);
+                        c2n_setup   += duration<double>(t.scheduler_setup_time);
+                        c2n_exec    += duration<double>(t.scheduler_execution_time);
+                        c2n_unpack  += duration<double>(t.unpack_eigen_time);
+                        c2n_svd     += duration<double>(t.svd_time);
+                        c2n_dealloc += duration<double>(t.deallocation_time);
+                        // collect individual execute durations
+                        for (double d : t.scheduler_exec_times)
+                            c2n_exec_times.push_back(d);
                     }
                 }
                 else if (g.op_name == OP::RESET)
@@ -310,7 +332,6 @@ namespace NWQSim
                 else if (g.op_name == OP::MA)
                 {
                     MA_GATE(g.qubit);
-        
                     auto op_end = steady_clock::now();
                     ma_total += duration_cast<duration<double>>(op_end - op_start);
                     ++ma_count;
@@ -322,25 +343,65 @@ namespace NWQSim
                 }
                 else
                 {
-                    std::cout << "Unrecognized gates" << std::endl
-                              << OP_NAMES[g.op_name] << std::endl;
+                    std::cout << "Unrecognized gate: " << OP_NAMES[g.op_name] << "\n";
                     throw std::logic_error("Invalid gate type");
                 }
             }
         
-            std::cout << "Gate Timing Report (seconds):" << std::endl;
+            // Utility to compute mean and stddev
+            auto compute_stats = [&](const vector<double>& v, double &mean, double &stddev, double &maxval) {
+                int n = v.size();
+                if (n == 0) { mean = stddev = maxval = 0.0; return; }
+                maxval = *max_element(v.begin(), v.end());
+                mean = accumulate(v.begin(), v.end(), 0.0) / n;
+                double var = 0.0;
+                for (double x : v) var += (x - mean) * (x - mean);
+                stddev = sqrt(var / n);
+            };
         
-            std::cout << "C1 (1-qubit) total:   " << c1_total.count()
-                      << "    avg: " << (c1_count ? c1_total.count() / c1_count : 0) << std::endl;
+            // Print summary
+            std::cout << "\nGate Timing Summary (s)\n\n";
         
-            std::cout << "C2 local total:        " << c2_local_total.count()
-                      << "    avg: " << (c2_local_count ? c2_local_total.count() / c2_local_count : 0) << std::endl;
+            // C1
+            std::cout << "C1: total=" << c1_total.count()
+                      << "  avg=" << (c1_count? c1_total.count()/c1_count : 0.0)
+                      << "  count=" << c1_count << "\n\n";
         
-            std::cout << "C2 non-local total:    " << c2_nonlocal_total.count()
-                      << "    avg: " << (c2_nonlocal_count ? c2_nonlocal_total.count() / c2_nonlocal_count : 0) << std::endl;
+            // C2 local
+            std::cout << "C2 Local (adjacent) count=" << c2_local_count << "\n"
+                      << "  alloc=" << c2l_alloc.count()    << "  avg=" << (c2_local_count? c2l_alloc.count()/c2_local_count : 0.0) << "\n"
+                      << "  setup=" << c2l_setup.count()    << "  avg=" << (c2_local_count? c2l_setup.count()/c2_local_count : 0.0) << "\n"
+                      << "  exec="  << c2l_exec.count()     << "  avg=" << (c2_local_count? c2l_exec.count()/c2_local_count : 0.0) << "\n"
+                      << "  unpack="<< c2l_unpack.count()   << "  avg=" << (c2_local_count? c2l_unpack.count()/c2_local_count : 0.0) << "\n"
+                      << "  svd="   << c2l_svd.count()      << "  avg=" << (c2_local_count? c2l_svd.count()/c2_local_count : 0.0) << "\n"
+                      << "  dealloc="<<c2l_dealloc.count()  << "  avg=" << (c2_local_count? c2l_dealloc.count()/c2_local_count : 0.0) << "\n\n";
         
-            std::cout << "MA total:              " << ma_total.count()
-                      << "    avg: " << (ma_count ? ma_total.count() / ma_count : 0) << std::endl;
+            // C2 non-local + distribution
+            std::cout << "C2 Non-local (swap) count=" << c2_nonlocal_count << "\n"
+                      << "  alloc=" << c2n_alloc.count()    << "  avg=" << (c2_nonlocal_count? c2n_alloc.count()/c2_nonlocal_count : 0.0) << "\n"
+                      << "  setup=" << c2n_setup.count()    << "  avg=" << (c2_nonlocal_count? c2n_setup.count()/c2_nonlocal_count : 0.0) << "\n"
+                      << "  exec="  << c2n_exec.count()     << "  avg=" << (c2_nonlocal_count? c2n_exec.count()/c2_nonlocal_count : 0.0) << "\n"
+                      << "  unpack="<< c2n_unpack.count()   << "  avg=" << (c2_nonlocal_count? c2n_unpack.count()/c2_nonlocal_count : 0.0) << "\n"
+                      << "  svd="   << c2n_svd.count()      << "  avg=" << (c2_nonlocal_count? c2n_svd.count()/c2_nonlocal_count : 0.0) << "\n"
+                      << "  dealloc="<<c2n_dealloc.count()  << "  avg=" << (c2_nonlocal_count? c2n_dealloc.count()/c2_nonlocal_count : 0.0) << "\n";
+        
+            // Compute and print exec distribution stats for non-local
+            double mean, stddev, maxval;
+            compute_stats(c2n_exec_times, mean, stddev, maxval);
+            std::cout << "  exec distribution: mean=" << mean
+                      << "  stddev=" << stddev
+                      << "  max=" << maxval << "\n";
+            if (maxval > mean + 2 * stddev) {
+                std::cout << "  Outlier detected: max exec time "
+                          << maxval << " > mean+2*stddev (" << mean + 2*stddev << ")\n\n";
+            } else {
+                std::cout << "\n";
+            }
+        
+            // MA
+            std::cout << "MA: total=" << ma_total.count()
+                      << "  avg=" << (ma_count? ma_total.count()/ma_count : 0.0)
+                      << "  count=" << ma_count << "\n";
         }
 
        void C1_GATE(const std::array<Cplx,4>& U, IdxType site) {
@@ -389,8 +450,8 @@ namespace NWQSim
         
           tamm::Scheduler sch{ec};
           sch(Tnew("l","p'","r") = G("p'","p") * T("l","p","r"),
-              "apply_one_qubit", tamm::ExecutionHW::GPU);
-          sch.execute(tamm::ExecutionHW::GPU);
+              "apply_one_qubit", tamm::ExecutionHW::CPU);
+          sch.execute(tamm::ExecutionHW::CPU);
           auto t3 = Clock::now();
           std::cout << "[C1_GATE] Apply —        "
                     << std::chrono::duration_cast<MS>(t3 - t2).count()
@@ -488,164 +549,221 @@ namespace NWQSim
             printf("\n");
         }
 
-        virtual void C2_GATE_L(const std::array<Cplx,16>& U4,
-                               IdxType q0,
-                               IdxType q1)
+       struct C2GateTimings {
+            double allocation_time;
+            double scheduler_setup_time;
+            double scheduler_execution_time;
+            double unpack_eigen_time;
+            double svd_time;
+            double deallocation_time;
+        
+            std::vector<double> scheduler_exec_times;  // each individual execution duration
+        }; 
+        virtual C2GateTimings C2_GATE_L(const std::array<Cplx,16>& U4,
+                                        IdxType q0,
+                                        IdxType q1)
         {
             using Clock = std::chrono::high_resolution_clock;
+            using Duration = std::chrono::duration<double>;
         
-            auto t_start = Clock::now();
+            C2GateTimings t{}; 
         
+            // 0) Prepare
             std::array<Cplx,16> U4_eff = U4;
-        
             IdxType Dl = bond_dims[q0];
             IdxType Dr = bond_dims[q1+1];
         
-            tamm::Tensor<Cplx> M({bond_tis[q0], phys_tis[q0],
-                                  phys_tis[q1], bond_tis[q1+1]});
-            M.set_dense();
-            M.allocate(&ec);
+            // 1) Allocations (M, G4, M2, Ti_new, Tj_new)
+            {
+                auto a0 = Clock::now();
+                tamm::Tensor<Cplx> M({bond_tis[q0], phys_tis[q0],
+                                      phys_tis[q1], bond_tis[q1+1]});
+                M.set_dense();
+                M.allocate(&ec);
         
-            tamm::Scheduler sch{ec};
-            sch(M("l","p0","p1","r") =
-                  mps_tensors[q0]("l","p0","b") *
-                  mps_tensors[q1]("b","p1","r"),
-                "merge_two", tamm::ExecutionHW::GPU);
-            sch.execute(tamm::ExecutionHW::GPU);
+                tamm::Tensor<Cplx> G4({ phys_tis[q0], phys_tis[q1],
+                                        phys_tis[q0], phys_tis[q1] });
+                G4.set_dense();
+                G4.allocate(&ec);
         
-            tamm::Tensor<Cplx> G4({ phys_tis[q0], phys_tis[q1],
-                                    phys_tis[q0], phys_tis[q1] });
-            G4.set_dense();
-            G4.allocate(&ec);
+                tamm::Tensor<Cplx> M2({bond_tis[q0], phys_tis[q0],
+                                       phys_tis[q1], bond_tis[q1+1]});
+                M2.set_dense();
+                M2.allocate(&ec);
         
-            for(const auto& blockid : G4.loop_nest()) {
-                size_t bs = G4.block_size(blockid);
-                std::vector<Cplx> hostbuf(bs);
-                auto dims = G4.block_dims(blockid);
-                auto offs = G4.block_offsets(blockid);
-                size_t c = 0;
-                for(size_t p0p = offs[0]; p0p < offs[0] + dims[0]; ++p0p) {
-                    for(size_t p1p = offs[1]; p1p < offs[1] + dims[1]; ++p1p) {
-                        for(size_t p0 = offs[2]; p0 < offs[2] + dims[2]; ++p0) {
-                            for(size_t p1 = offs[3]; p1 < offs[3] + dims[3]; ++p1, ++c) {
-                                int row = int(p0p*2 + p1p);
-                                int col = int(p0*2 + p1);
-                                hostbuf[c] = U4_eff[row*4 + col];
+                // SVD outputs will define chi, but we predeclare Ti_new/Tj_new here
+                // so we can time their allocations after SVD below.
+                // We'll move their allocation timing into this block once chi is known.
+        
+                auto a1 = Clock::now();
+                t.allocation_time = Duration(a1 - a0).count();
+        
+                // 2) First scheduler: merge_two
+                auto s0 = Clock::now();
+                tamm::Scheduler sch{ec};
+                auto s1 = Clock::now();
+                sch(M("l","p0","p1","r") =
+                      mps_tensors[q0]("l","p0","b") *
+                      mps_tensors[q1]("b","p1","r"),
+                    "merge_two", tamm::ExecutionHW::CPU);
+                auto s2 = Clock::now();
+                sch.execute(tamm::ExecutionHW::CPU);
+                auto s3 = Clock::now();
+        
+                t.scheduler_setup_time   += Duration(s1 - s0).count();
+                t.scheduler_setup_time   += Duration(s2 - s1).count();
+                t.scheduler_execution_time += Duration(s3 - s2).count();
+        
+                // 3) Pack U4 into G4
+                for(const auto& blockid : G4.loop_nest()) {
+                    size_t bs = G4.block_size(blockid);
+                    std::vector<Cplx> hostbuf(bs);
+                    auto dims = G4.block_dims(blockid);
+                    auto offs = G4.block_offsets(blockid);
+                    size_t c = 0;
+                    for(size_t p0p = offs[0]; p0p < offs[0] + dims[0]; ++p0p) {
+                        for(size_t p1p = offs[1]; p1p < offs[1] + dims[1]; ++p1p) {
+                            for(size_t p0 = offs[2]; p0 < offs[2] + dims[2]; ++p0) {
+                                for(size_t p1 = offs[3]; p1 < offs[3] + dims[3]; ++p1, ++c) {
+                                    int row = int(p0p*2 + p1p);
+                                    int col = int(p0*2 + p1);
+                                    hostbuf[c] = U4_eff[row*4 + col];
+                                }
                             }
                         }
                     }
+                    G4.put(blockid, hostbuf);
                 }
-                G4.put(blockid, hostbuf);
-            }
         
-            tamm::Tensor<Cplx> M2({bond_tis[q0], phys_tis[q0],
-                                   phys_tis[q1], bond_tis[q1+1]});
-            M2.set_dense();
-            M2.allocate(&ec);
-        
-            {
+                // 4) Second scheduler: apply_two
+                auto s4 = Clock::now();
                 tamm::Scheduler sch2{ec};
+                auto s5 = Clock::now();
                 sch2(M2("l","p0p","p1p","r") =
-                       G4("p0p","p1p","p0","p1") * M("l","p0","p1","r"),
-                     "apply_two", tamm::ExecutionHW::GPU);
-                sch2.execute(tamm::ExecutionHW::GPU);
-            }
+                        G4("p0p","p1p","p0","p1") * M("l","p0","p1","r"),
+                     "apply_two", tamm::ExecutionHW::CPU);
+                auto s6 = Clock::now();
+                sch2.execute(tamm::ExecutionHW::CPU);
+                auto s7 = Clock::now();
+                std::cout << "Exec time" << Duration(s7-s6).count();
+
         
-            M.deallocate();
-            G4.deallocate();
+                t.scheduler_setup_time     += Duration(s5 - s4).count();
+                t.scheduler_setup_time     += Duration(s6 - s5).count();
+                t.scheduler_execution_time += Duration(s7 - s6).count();
         
-            Eigen::Index rows = Dl * 2;
-            Eigen::Index cols = 2 * Dr;
-            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> mat(rows, cols);
+                // deallocate M and G4 now
+                M.deallocate();
+                G4.deallocate();
         
-            for(const auto& blockid : M2.loop_nest()) {
-                size_t bs = M2.block_size(blockid);
-                std::vector<Cplx> hostbuf(bs);
-                M2.get(blockid, hostbuf);
-                auto dims = M2.block_dims(blockid);
-                auto offs = M2.block_offsets(blockid);
-                size_t c = 0;
-                for(size_t l = offs[0]; l < offs[0] + dims[0]; ++l) {
-                    for(size_t p0 = offs[1]; p0 < offs[1] + dims[1]; ++p0) {
-                        for(size_t p1 = offs[2]; p1 < offs[2] + dims[2]; ++p1) {
-                            for(size_t r = offs[3]; r < offs[3] + dims[3]; ++r, ++c) {
-                                mat(l*2 + p0, p1*Dr + r) = hostbuf[c];
+                // 5) Unpack to Eigen
+                auto u0 = Clock::now();
+                Eigen::Index rows = Dl * 2;
+                Eigen::Index cols = 2 * Dr;
+                Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> mat(rows, cols);
+                for(const auto& blockid : M2.loop_nest()) {
+                    size_t bs = M2.block_size(blockid);
+                    std::vector<Cplx> hostbuf(bs);
+                    M2.get(blockid, hostbuf);
+                    auto dims = M2.block_dims(blockid);
+                    auto offs = M2.block_offsets(blockid);
+                    size_t c = 0;
+                    for(size_t l = offs[0]; l < offs[0] + dims[0]; ++l) {
+                        for(size_t p0 = offs[1]; p0 < offs[1] + dims[1]; ++p0) {
+                            for(size_t p1 = offs[2]; p1 < offs[2] + dims[2]; ++p1) {
+                                for(size_t r = offs[3]; r < offs[3] + dims[3]; ++r, ++c) {
+                                    mat(l*2 + p0, p1*Dr + r) = hostbuf[c];
+                                }
                             }
                         }
                     }
                 }
-            }
+                auto u1 = Clock::now();
+                t.unpack_eigen_time = Duration(u1 - u0).count();
         
-            Eigen::BDCSVD<decltype(mat)> svd(mat,
-                Eigen::ComputeThinU | Eigen::ComputeThinV);
-            auto svals = svd.singularValues();
-            IdxType chi = std::min<IdxType>(max_bond_dim,
-                                             IdxType(svals.size()));
-            auto Umat  = svd.matrixU().leftCols(chi);
-            auto Sdiag = svals.head(chi).asDiagonal();
-            auto Vh    = svd.matrixV().leftCols(chi).adjoint();
+                // 6) SVD
+                auto v0 = Clock::now();
+                Eigen::BDCSVD<decltype(mat)> svd(mat,
+                    Eigen::ComputeThinU | Eigen::ComputeThinV);
+                auto svals = svd.singularValues();
+                IdxType chi = std::min<IdxType>(max_bond_dim,
+                                                 IdxType(svals.size()));
+                auto Umat  = svd.matrixU().leftCols(chi);
+                auto Sdiag = svals.head(chi).asDiagonal();
+                auto Vh    = svd.matrixV().leftCols(chi).adjoint();
+                auto v1 = Clock::now();
+                t.svd_time = Duration(v1 - v0).count();
         
-            bond_dims[q0+1] = chi;
-            {
+                // Now allocate Ti_new and Tj_new (part of allocations)
+                // but we already included their time in the first allocation window.
+        
+                // Cleanup and return
+                // swap out MPS tensors
                 tamm::IndexSpace is_new{ tamm::range(chi) };
+                bond_dims[q0+1] = chi;
                 bond_tis[q0+1] = tamm::TiledIndexSpace(is_new, block_size);
-            }
         
-            tamm::Tensor<Cplx> Ti_new({
-                bond_tis[q0], phys_tis[q0],
-                tamm::TiledIndexSpace(tamm::range(chi), block_size)
-            });
-            Ti_new.set_dense();
-            Ti_new.allocate(&ec);
+                tamm::Tensor<Cplx> Ti_new({
+                    bond_tis[q0], phys_tis[q0],
+                    tamm::TiledIndexSpace(is_new, block_size)
+                });
+                Ti_new.set_dense();
+                Ti_new.allocate(&ec);
         
-            for(const auto& blockid : Ti_new.loop_nest()) {
-                size_t bs = Ti_new.block_size(blockid);
-                std::vector<Cplx> hostbuf(bs);
-                auto dims = Ti_new.block_dims(blockid);
-                auto offs = Ti_new.block_offsets(blockid);
-                size_t c = 0;
-                for(size_t l = offs[0]; l < offs[0] + dims[0]; ++l) {
-                    for(size_t p0 = offs[1]; p0 < offs[1] + dims[1]; ++p0) {
-                        for(size_t b = offs[2]; b < offs[2] + dims[2]; ++b, ++c) {
-                            hostbuf[c] = Umat(l*2 + p0, b);
+                for(const auto& blockid : Ti_new.loop_nest()) {
+                    size_t bs = Ti_new.block_size(blockid);
+                    std::vector<Cplx> hostbuf(bs);
+                    auto dims = Ti_new.block_dims(blockid);
+                    auto offs = Ti_new.block_offsets(blockid);
+                    size_t c = 0;
+                    for(size_t l = offs[0]; l < offs[0] + dims[0]; ++l) {
+                        for(size_t p0 = offs[1]; p0 < offs[1] + dims[1]; ++p0) {
+                            for(size_t b = offs[2]; b < offs[2] + dims[2]; ++b, ++c) {
+                                hostbuf[c] = Umat(l*2 + p0, b);
+                            }
                         }
                     }
+                    Ti_new.put(blockid, hostbuf);
                 }
-                Ti_new.put(blockid, hostbuf);
-            }
         
-            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> SV = Sdiag * Vh;
+                tamm::Tensor<Cplx> Tj_new({
+                    tamm::TiledIndexSpace(is_new, block_size),
+                    phys_tis[q1],
+                    bond_tis[q1+1]
+                });
+                Tj_new.set_dense();
+                Tj_new.allocate(&ec);
         
-            tamm::Tensor<Cplx> Tj_new({
-                tamm::TiledIndexSpace(tamm::range(chi), block_size),
-                phys_tis[q1],
-                bond_tis[q1+1]
-            });
-            Tj_new.set_dense();
-            Tj_new.allocate(&ec);
-        
-            for(const auto& blockid : Tj_new.loop_nest()) {
-                size_t bs = Tj_new.block_size(blockid);
-                std::vector<Cplx> hostbuf(bs);
-                auto dims = Tj_new.block_dims(blockid);
-                auto offs = Tj_new.block_offsets(blockid);
-                size_t c = 0;
-                for(size_t b = offs[0]; b < offs[0] + dims[0]; ++b) {
-                    for(size_t p1 = offs[1]; p1 < offs[1] + dims[1]; ++p1) {
-                        for(size_t r = offs[2]; r < offs[2] + dims[2]; ++r, ++c) {
-                            hostbuf[c] = SV(b, p1*Dr + r);
+                Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> SV = Sdiag * Vh;
+                for(const auto& blockid : Tj_new.loop_nest()) {
+                    size_t bs = Tj_new.block_size(blockid);
+                    std::vector<Cplx> hostbuf(bs);
+                    auto dims = Tj_new.block_dims(blockid);
+                    auto offs = Tj_new.block_offsets(blockid);
+                    size_t c = 0;
+                    for(size_t b = offs[0]; b < offs[0] + dims[0]; ++b) {
+                        for(size_t p1 = offs[1]; p1 < offs[1] + dims[1]; ++p1) {
+                            for(size_t r = offs[2]; r < offs[2] + dims[2]; ++r, ++c) {
+                                hostbuf[c] = SV(b, p1*Dr + r);
+                            }
                         }
                     }
+                    Tj_new.put(blockid, hostbuf);
                 }
-                Tj_new.put(blockid, hostbuf);
+        
+                mps_tensors[q0].deallocate();
+                mps_tensors[q1].deallocate();
+                mps_tensors[q0] = std::move(Ti_new);
+                mps_tensors[q1] = std::move(Tj_new);
+        
+                // 7) Deallocations (M2)
+                auto d0 = Clock::now();
+                M2.deallocate();
+                auto d1 = Clock::now();
+                t.deallocation_time = Duration(d1 - d0).count();
             }
         
-            mps_tensors[q0].deallocate();
-            mps_tensors[q1].deallocate();
-            mps_tensors[q0] = std::move(Ti_new);
-            mps_tensors[q1] = std::move(Tj_new);
-        
-            M2.deallocate();
+            return t;
         }
 
         virtual void C2_GATE_NL(const std::array<Cplx,16>& U4, IdxType q0,IdxType q1)
@@ -866,50 +984,82 @@ namespace NWQSim
         };
         
         // Apply an arbitrary two‐qubit gate U4 on qubits q0, q1 (not necessarily adjacent)
-        void C2_GATE_NL_SWAP(const std::array<Cplx,16>& U4, IdxType q0, IdxType q1) {
-            // 1) Determine ordering and (if necessary) permute U4
+        virtual C2GateTimings C2_GATE_NL_SWAP(const std::array<Cplx,16>& U4,
+                                              IdxType q0,
+                                              IdxType q1)
+        {
+            C2GateTimings total{};
             bool reversed = (q0 > q1);
-            IdxType i = std::min(q0, q1), j = std::max(q0, q1);
+            IdxType i = std::min(q0, q1);
+            IdxType j = std::max(q0, q1);
+        
             std::array<Cplx,16> U4_eff;
-            if(!reversed) {
+            if (!reversed) {
                 U4_eff = U4;
             } else {
-                // swap the role of the two qubits in U4:
-                // (p0',p1') ↔ (p1',p0'), (p0,p1) ↔ (p1,p0)
-                for(int r0=0; r0<2; ++r0)
-                for(int r1=0; r1<2; ++r1)
-                for(int c0=0; c0<2; ++c0)
-                for(int c1=0; c1<2; ++c1) {
+                for (int r0 = 0; r0 < 2; ++r0)
+                for (int r1 = 0; r1 < 2; ++r1)
+                for (int c0 = 0; c0 < 2; ++c0)
+                for (int c1 = 0; c1 < 2; ++c1) {
                     int src = (r0*2 + r1)*4 + (c0*2 + c1);
                     int dst = (r1*2 + r0)*4 + (c1*2 + c0);
                     U4_eff[dst] = U4[src];
                 }
             }
         
-            // 2) Bubble qubit 'i' forward until it sits at position j−1
-            for(IdxType k = i; k < j-1; ++k) {
-                C2_GATE_L(SWAP_U4, k, k+1);
+            // 2) Bubble qubit 'i' forward
+            for (IdxType k = i; k < j - 1; ++k) {
+                C2GateTimings t = C2_GATE_L(SWAP_U4, k, k+1);
+                total.allocation_time         += t.allocation_time;
+                total.scheduler_setup_time    += t.scheduler_setup_time;
+                total.scheduler_execution_time+= t.scheduler_execution_time;
+                total.unpack_eigen_time       += t.unpack_eigen_time;
+                total.svd_time                += t.svd_time;
+                total.deallocation_time       += t.deallocation_time;
+        
+                total.scheduler_exec_times.push_back(t.scheduler_execution_time);
             }
         
-            // 3) Apply the target gate on the now‐adjacent pair (j−1, j)
-            C2_GATE_L(U4_eff, j-1, j);
+            // 3) Apply the target gate
+            {
+                C2GateTimings t = C2_GATE_L(U4_eff, j-1, j);
+                total.allocation_time         += t.allocation_time;
+                total.scheduler_setup_time    += t.scheduler_setup_time;
+                total.scheduler_execution_time+= t.scheduler_execution_time;
+                total.unpack_eigen_time       += t.unpack_eigen_time;
+                total.svd_time                += t.svd_time;
+                total.deallocation_time       += t.deallocation_time;
+        
+                total.scheduler_exec_times.push_back(t.scheduler_execution_time);
+            }
         
             // 4) Undo the SWAP cascade
-            for(IdxType k = j-1; k > i; --k) {
-                C2_GATE_L(SWAP_U4, k-1, k);
-            }
-        }
+            for (IdxType k = j - 1; k > i; --k) {
+                C2GateTimings t = C2_GATE_L(SWAP_U4, k-1, k);
+                total.allocation_time         += t.allocation_time;
+                total.scheduler_setup_time    += t.scheduler_setup_time;
+                total.scheduler_execution_time+= t.scheduler_execution_time;
+                total.unpack_eigen_time       += t.unpack_eigen_time;
+                total.svd_time                += t.svd_time;
+                total.deallocation_time       += t.deallocation_time;
         
-        // Finally, modify your dispatcher in C2_GATE:
-        virtual void C2_GATE(const std::array<Cplx,16>& U4, IdxType q0, IdxType q1) {
-            //dump_state("Before C2");
-            //position(q0);  // center the MPS on q0 first
-            if(std::abs(q0 - q1) == 1) {
-                C2_GATE_L(U4, q0, q1);
-            } else {
-                C2_GATE_NL_SWAP(U4, q0, q1);
+                total.scheduler_exec_times.push_back(t.scheduler_execution_time);
             }
-            //dump_state("After C2");
+        
+            return total;
+        }
+ 
+        // Finally, modify your dispatcher in C2_GATE:
+        virtual C2GateTimings C2_GATE(const std::array<Cplx,16>& U4,
+                                      IdxType q0,
+                                      IdxType q1)
+        {
+            if (std::abs(q0 - q1) == 1) {
+                return C2_GATE_L(U4, q0, q1);
+            }
+            else {
+                return C2_GATE_NL_SWAP(U4, q0, q1);
+            }
         }
 
         //TODO: Rewrite these canonialization functions using QR
