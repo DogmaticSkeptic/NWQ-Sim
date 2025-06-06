@@ -21,10 +21,7 @@ srun -u \
 
 Things Still needed to be added
 
-- Dynamic tile size as well? Or for putting in specified value
 - Dependency graph
-- add ifdef statements for tamm and itensor build, in the CMAKE file (needs to be able to compile without needing tamm)
-- Add singular value cutoff
 - Add i_proc so it doesn't print off a for each rank
 - Make some pi charts of what most of the time is being used for during MPS simulation.
 
