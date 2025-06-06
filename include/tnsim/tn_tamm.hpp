@@ -61,7 +61,6 @@ namespace NWQSim
             ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga)
         {
             if(ec.print()) {
-                std::cout << tamm_git_info() << std::endl;
                 auto current_time   = std::chrono::system_clock::now();
                 auto current_time_t = std::chrono::system_clock::to_time_t(current_time);
                 auto cur_local_time = localtime(&current_time_t);
@@ -76,9 +75,6 @@ namespace NWQSim
                 std::cout << std::endl;
                 ec.print_mem_info();
                 std::cout << std::endl;
-                std::cout << "basis functions: " << nbf << ", occ_alpha: " << n_occ_alpha
-                          << ", virt_alpha: " << n_vir_alpha << ", chol-count: " << chol_count
-                          << ", tilesize: " << tile_size << std::endl;
             }
             if (backend == "TN_TAMM_CPU")
             {
