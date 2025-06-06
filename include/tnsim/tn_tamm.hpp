@@ -333,7 +333,7 @@ namespace NWQSim
         
             // replace old tensor and free memory
             T.deallocate();
-    mps_tensors[site] =u std::move(Tnew);
+            mps_tensors[site] = std::move(Tnew);
             G.deallocate();
         }
  
@@ -535,7 +535,7 @@ namespace NWQSim
                 }
             }
             
-            IdxType chi = std::min<IdxType>(max_bond_dim_, IdxType(keep.size()));
+            IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
             
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat(mat.rows(), chi);
             Eigen::Matrix<Cplx, Eigen::Dynamic, 1> kept_svals(chi);
