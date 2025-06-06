@@ -98,7 +98,7 @@ public:
         
         else if (backend.rfind("TN_TAMM", 0) == 0) 
         {
-            return std::make_shared<NWQSim::TN_TAMM>(numQubits, max_dim, backend);
+            return std::make_shared<NWQSim::TN_TAMM>(numQubits, max_dim, sv_cutoff, backend);
         }
 
 #ifdef OMP_ENABLED
