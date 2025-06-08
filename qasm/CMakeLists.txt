@@ -1,5 +1,4 @@
 set(SOURCE_FILE "nwq_qasm.cpp")
-find_package(TAMM REQUIRED)
 
 add_executable(nwq_qasm nwq_qasm.cpp)
 target_compile_features(nwq_qasm PRIVATE cxx_std_17)
@@ -40,13 +39,14 @@ if(HIP_FOUND)
     target_compile_definitions(nwq_qasm PUBLIC HIP_ENABLED)
 endif()
 
-# —————————————————————————————————————————————————————
-# Link ITensor and Cray LibSci BLAS/LAPACK
-target_link_libraries(nwq_qasm
-  PRIVATE
-    itensor         # imported ITensor library
-    tamm::tamm
-)
+# If iTensor is found, enable itensor TN CPU simulator
+if (ITENSOR_FOUND)
+    target_link_libraries(nwq_qasm PRIVATE itensor)
+    target_compile_definitions(nwq_qasm PUBLIC ITENSOR_ENABLED)
+endif()
 
-# —————————————————————————————————————————————————————
-
+# If TAMM is found, enable the TN TAMM backend
+if (TAMM_FOUND)
+    target_link_libraries(nwq_qasm PRIVATE tamm::tamm)
+    target_compile_definitions(nwq_qasm PUBLIC TAMM_ENABLED)
+endif()

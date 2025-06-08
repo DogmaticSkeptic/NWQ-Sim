@@ -33,6 +33,7 @@ find_package(XACC QUIET)
 find_package(HIP QUIET)
 find_package(LAPACK)
 find_package(BLAS)
+find_package(TAMM)
 
 set(ma_enable "N/A") 
 if(CUDAToolkit_FOUND)
@@ -81,19 +82,24 @@ else()
 endif()
 
 
-# Link Itensor
-set(ITENSOR_ROOT "../itensor"
+# Path to external ITensor installation
+set(ITENSOR_ROOT "${CMAKE_SOURCE_DIR}/../itensor"
     CACHE PATH "Path to external iTensor installation")
 
-include_directories("${ITENSOR_ROOT}")
+# Check that the directory and library actually exist
+if (IS_DIRECTORY "${ITENSOR_ROOT}" AND EXISTS "${ITENSOR_ROOT}/lib/libitensor.a")
+    set(ITENSOR_FOUND TRUE CACHE BOOL "ITensor library available")
 
-# ————————————————————————————————————————————————————————————————
-# Create an IMPORTED target for the external ITensor library
-add_library(itensor STATIC IMPORTED)
-set_target_properties(itensor PROPERTIES
-  IMPORTED_LOCATION "${ITENSOR_ROOT}/lib/libitensor.a"
-  INTERFACE_INCLUDE_DIRECTORIES "${ITENSOR_ROOT}"
-)
+    include_directories("${ITENSOR_ROOT}")
+
+    add_library(itensor STATIC IMPORTED)
+    set_target_properties(itensor PROPERTIES
+        IMPORTED_LOCATION "${ITENSOR_ROOT}/lib/libitensor.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${ITENSOR_ROOT}"
+    )
+else()
+    set(ITENSOR_FOUND FALSE CACHE BOOL "ITensor library available")
+endif()
 
 # Point to the Cray LibSci install (discover via module show / $LD_LIBRARY_PATH)
 set(CRAY_LIBSCI_ROOT "/opt/cray/pe/libsci/24.07.0/NVIDIA/23.3/x86_64")
@@ -156,6 +162,8 @@ message(STATUS "OpenMP found: ${OpenMP_CXX_FOUND}")
 message(STATUS "MPI found: ${MPI_FOUND}")
 message(STATUS "CUDA found: ${CUDAToolkit_FOUND}")
 message(STATUS "HIP found: ${hip_found_str}")
+message(STATUS "TAMM found: ${TAMM_FOUND}")
+message(STATUS "iTensor found: ${ITENSOR_FOUND}")
 message(STATUS "NVSHMEM found: ${nvshmem_found_str}")
 message(STATUS "XACC found: ${xacc_found_str}")
 message(STATUS "Matrix Accelerator ENABLED: ${ma_enable}")
