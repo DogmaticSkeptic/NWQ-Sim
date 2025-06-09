@@ -25,6 +25,13 @@ if (NOT XACC_DIR)
   set(XACC_DIR "$ENV{HOME}/.xacc")
 endif()
 
+if ( NOT DEFINED TAMM_DIR )
+  set(TAMM_DIR "$ENV{HOME}/AaronForkNWQ-Sim/tamm_install"
+      CACHE PATH "Path to external TAMM installation")
+endif()
+
+list(APPEND CMAKE_PREFIX_PATH "${TAMM_DIR}")
+
 # Find required packages
 find_package(CUDAToolkit)
 find_package(MPI)
@@ -34,6 +41,9 @@ find_package(HIP QUIET)
 find_package(LAPACK)
 find_package(BLAS)
 find_package(TAMM)
+
+get_target_property(_mpi_includes MPI::MPI_CXX INTERFACE_INCLUDE_DIRECTORIES)
+message(STATUS "MPI::MPI_CXX include dirs: ${_mpi_includes}")
 
 set(ma_enable "N/A") 
 if(CUDAToolkit_FOUND)
@@ -80,6 +90,7 @@ if(CUDAToolkit_FOUND)
 else()
     set(nvshmem_found_str "N/A")
 endif()
+
 
 
 # Path to external ITensor installation

@@ -61,7 +61,7 @@ namespace NWQSim
             ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga)
         {
             i_proc = pg.rank().value();
-            printf(i_proc);
+            
             if(ec.print()) {
                 auto current_time   = std::chrono::system_clock::now();
                 auto current_time_t = std::chrono::system_clock::to_time_t(current_time);
