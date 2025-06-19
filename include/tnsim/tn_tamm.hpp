@@ -58,7 +58,8 @@ namespace NWQSim
             max_bond_dim(max_bond_dim),
             sv_cutoff(sv_cutoff),
             pg(init_pg()),
-            ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga)
+            ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga),
+            sch(ec)
         {
             // set the i_proc to prevent repeat prints
             i_proc = pg.rank().value();
@@ -255,6 +256,7 @@ namespace NWQSim
         std::vector<tamm::TiledIndexSpace> bond_tis;
         std::vector<tamm::TiledIndexSpace> phys_tis;
         std::vector<tamm::Tensor<Cplx>> mps_tensors;
+        tamm::Scheduler sch;
         IdxType* result = nullptr;
 
 
@@ -346,7 +348,6 @@ namespace NWQSim
             Tnew.set_dense();
             Tnew.allocate(&ec);
         
-            tamm::Scheduler sch{ec};
             sch(Tnew("l","p'","r") = G("p'","p") * T("l","p","r"),
                 "apply_one_qubit", exec_hw);
             sch.execute(exec_hw);
@@ -471,14 +472,12 @@ namespace NWQSim
             tamm::Tensor<Cplx> M({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M.set_dense();
             M.allocate(&ec);
-            {
-                tamm::Scheduler sch{ec};
-                sch(M("l","p0","p1","r") =
-                    mps_tensors[q0]("l","p0","b") *
-                    mps_tensors[q1]("b","p1","r"),
-                    "merge_two", exec_hw);
-                sch.execute(exec_hw);
-            }
+
+            sch(M("l","p0","p1","r") =
+                mps_tensors[q0]("l","p0","b") *
+                mps_tensors[q1]("b","p1","r"),
+                "merge_two", exec_hw);
+            sch.execute(exec_hw);
         
             // build two qubit gate tensor G4
             tamm::Tensor<Cplx> G4({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
@@ -514,11 +513,10 @@ namespace NWQSim
             M2.set_dense();
             M2.allocate(&ec);
             {
-                tamm::Scheduler sch2{ec};
-                sch2(M2("l","p0p","p1p","r") =
+                sch(M2("l","p0p","p1p","r") =
                      G4("p0p","p1p","p0","p1") * M("l","p0","p1","r"),
                      "apply_two", exec_hw);
-                sch2.execute(exec_hw);
+                sch.execute(exec_hw);
             }
             M.deallocate();
             G4.deallocate();
@@ -700,13 +698,11 @@ namespace NWQSim
             tamm::Tensor<Cplx> M0({ bond_tis[q0], phys_tis[q0], mid_ti, r_old_ti });
             M0.set_dense();
             M0.allocate(&ec);
-            {
-                tamm::Scheduler sch{ ec };
-                sch(M0("l","pout","a","r") =
-                    Uten("pout","pin","a") * mps_tensors[q0]("l","pin","r"),
-                    "merge_control", exec_hw);
-                sch.execute(exec_hw);
-            }
+
+            sch(M0("l","pout","a","r") =
+                Uten("pout","pin","a") * mps_tensors[q0]("l","pin","r"),
+                "merge_control", exec_hw);
+            sch.execute(exec_hw);
             Uten.deallocate();
         
             // flatten and SVD M0
@@ -775,13 +771,11 @@ namespace NWQSim
                                         tamm::TiledIndexSpace{ tamm::IndexSpace{tamm::range(Dr_i)}, 1 } });
                 M1.set_dense();
                 M1.allocate(&ec);
-                {
-                    tamm::Scheduler sch{ ec };
-                    sch(M1("a","p","r") =
-                        prop("a","l") * mps_tensors[site]("l","p","r"),
-                        "merge_prop", exec_hw);
-                    sch.execute(exec_hw);
-                }
+
+                sch(M1("a","p","r") =
+                    prop("a","l") * mps_tensors[site]("l","p","r"),
+                    "merge_prop", exec_hw);
+                sch.execute(exec_hw);
         
                 // SVD at site
                 Eigen::Index rows1 = currChi * 2;
@@ -845,13 +839,11 @@ namespace NWQSim
                                       tamm::TiledIndexSpace{ tamm::IndexSpace{tamm::range(bond_dims[q1+1])}, 1 } });
             Tmid.set_dense();
             Tmid.allocate(&ec);
-            {
-                tamm::Scheduler sch{ ec };
-                sch(Tmid("a","pin","r") =
-                    prop("a","l") * mps_tensors[q1]("l","pin","r"),
-                    "propagate_to_target", exec_hw);
-                sch.execute(exec_hw);
-            }
+
+            sch(Tmid("a","pin","r") =
+                prop("a","l") * mps_tensors[q1]("l","pin","r"),
+                "propagate_to_target", exec_hw);
+            sch.execute(exec_hw);
             mps_tensors[q1].deallocate();
         
             // absorb gate spectrum at target
@@ -872,13 +864,11 @@ namespace NWQSim
             tamm::Tensor<Cplx> Tfin({ bond_tis[q1], phys_tis[q1], bond_tis[q1+1] });
             Tfin.set_dense();
             Tfin.allocate(&ec);
-            {
-                tamm::Scheduler sch{ ec };
-                sch(Tfin("a","p","r") =
-                    Gten("a","p","pin") * Tmid("a","pin","r"),
-                    "absorb_gate_spectrum", exec_hw);
-                sch.execute(exec_hw);
-            }
+
+            sch(Tfin("a","p","r") =
+                Gten("a","p","pin") * Tmid("a","pin","r"),
+                "absorb_gate_spectrum", exec_hw);
+            sch.execute(exec_hw);
         
             // finalize and cleanup
             Tmid.deallocate();
