@@ -1,7 +1,9 @@
 set(SOURCE_FILE "nwq_qasm.cpp")
 
 add_executable(nwq_qasm nwq_qasm.cpp)
+add_executable(tamm_test tamm_test.cpp)
 target_compile_features(nwq_qasm PRIVATE cxx_std_17)
+target_compile_features(tamm_test PRIVATE cxx_std_17)
 
 # Link against OpenMP if available
 if(OpenMP_FOUND)
@@ -62,4 +64,6 @@ endif()
 if (TAMM_FOUND)
     target_link_libraries(nwq_qasm PRIVATE tamm::tamm)
     target_compile_definitions(nwq_qasm PUBLIC TAMM_ENABLED)
+    target_link_libraries(tamm_test PRIVATE tamm::tamm)
+    target_compile_definitions(tamm_test PUBLIC TAMM_ENABLED)
 endif()
