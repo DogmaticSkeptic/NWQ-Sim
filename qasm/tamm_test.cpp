@@ -34,7 +34,7 @@ int main(int argc, char* argv[]) {
     // Generate 4 evenly spaced tile sizes between 1 and 100 inclusive
     std::vector<size_t> tile_sizes;
     tile_sizes.reserve(4);
-    const size_t T_min = 60;
+    const size_t T_min = 100;
     const size_t T_max = 160;
     const int num_T = 4;
     const double stepT = double(T_max - T_min) / double(num_T - 1);
@@ -111,11 +111,11 @@ int main(int argc, char* argv[]) {
             for(size_t N : sizes) {
                 tamm::Tile tile = static_cast<tamm::Tile>(std::min<size_t>(tile_val, N));
                 tamm::TiledIndexSpace tis{tamm::IndexSpace{tamm::range(N)}, tile};
-                auto [i,k,j] = tis.labels<3>("all");
+                auto [l, p, r, pprime] = tis.labels<3>("all");
 
-                tamm::Tensor<Cplx> A{i,k};
-                tamm::Tensor<Cplx> B{k,j};
-                tamm::Tensor<Cplx> C{i,j};
+                tamm::Tensor<Cplx> A{l, p, r};
+                tamm::Tensor<Cplx> B{p, pprime};
+                tamm::Tensor<Cplx> C{l, pprime, r};
                 if(use_dense) {
                     A.set_dense();
                     B.set_dense();
@@ -128,7 +128,7 @@ int main(int argc, char* argv[]) {
 
                 // TAMM CPU timing
                 auto t0 = std::chrono::high_resolution_clock::now();
-                sch(C(i,j) += A(i,k) * B(k,j)).execute(cpu_hw, false);
+                sch(C(l, pprime, r) += A(l, p, r) * B(pprime, p)).execute(cpu_hw, false);
                 auto t1 = std::chrono::high_resolution_clock::now();
                 double cpu_time = std::chrono::duration_cast<std::chrono::duration<double>>(t1 - t0).count();
 
@@ -138,7 +138,7 @@ int main(int argc, char* argv[]) {
                 double gpu_time = 0.0;
                 if(ec.has_gpu()) {
                     auto t2 = std::chrono::high_resolution_clock::now();
-                    sch(C(i,j) += A(i,k) * B(k,j)).execute(gpu_hw, false);
+                    sch(C(l, pprime, r) += A(l, p, r) * B(pprime, p)).execute(gpu_hw, false);
                     auto t3 = std::chrono::high_resolution_clock::now();
                     gpu_time = std::chrono::duration_cast<std::chrono::duration<double>>(t3 - t2).count();
                 }
