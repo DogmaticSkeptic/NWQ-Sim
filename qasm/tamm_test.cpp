@@ -10,7 +10,7 @@
 #include <tamm/tamm.hpp>
 #include <itensor/all.h>
 
-using Cplx = std::complex<ValueType>;
+using Cplx = std::complex<double>;
 
 int main(int argc, char* argv[]) {
     // Initialize TAMM
