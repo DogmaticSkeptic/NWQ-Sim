@@ -10,6 +10,8 @@
 #include <tamm/tamm.hpp>
 #include <itensor/all.h>
 
+using Cplx = std::complex<ValueType>;
+
 int main(int argc, char* argv[]) {
     // Initialize TAMM
     tamm::initialize(argc, argv);
@@ -111,9 +113,9 @@ int main(int argc, char* argv[]) {
                 tamm::TiledIndexSpace tis{tamm::IndexSpace{tamm::range(N)}, tile};
                 auto [i,k,j] = tis.labels<3>("all");
 
-                tamm::Tensor<double> A{i,k};
-                tamm::Tensor<double> B{k,j};
-                tamm::Tensor<double> C{i,j};
+                tamm::Tensor<Cplx> A{i,k};
+                tamm::Tensor<Cplx> B{k,j};
+                tamm::Tensor<Cplx> C{i,j};
                 if(use_dense) {
                     A.set_dense();
                     B.set_dense();
@@ -122,7 +124,7 @@ int main(int argc, char* argv[]) {
 
                 tamm::Scheduler sch{ec};
                 sch.allocate(A,B,C).execute();
-                sch(A() = 1.0)(B() = 1.0)(C() = 0.0).execute();
+                sch(A() = Cplx{1.0, 0.0})(B() = Cplx{1.0, 0.0})(C() = Cplx{0.0, 0.0}).execute();
 
                 // TAMM CPU timing
                 auto t0 = std::chrono::high_resolution_clock::now();
@@ -130,7 +132,7 @@ int main(int argc, char* argv[]) {
                 auto t1 = std::chrono::high_resolution_clock::now();
                 double cpu_time = std::chrono::duration_cast<std::chrono::duration<double>>(t1 - t0).count();
 
-                sch(C() = 0.0).execute();
+                sch(C() = Cplx{0.0, 0.0}).execute();
 
                 // TAMM GPU timing
                 double gpu_time = 0.0;
