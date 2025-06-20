@@ -54,7 +54,7 @@ namespace NWQSim
                 std::string backend = "TN_TAMM_CPU")
         : QuantumState(SimType::TN),
             n_qubits(n_qubits),
-            block_size(100),
+            block_size(160),
             max_bond_dim(max_bond_dim),
             sv_cutoff(sv_cutoff),
             pg(init_pg()),
