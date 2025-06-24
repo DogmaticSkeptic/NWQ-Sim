@@ -196,7 +196,47 @@ namespace NWQSim
             assert(circuit->num_qubits() == n_qubits);
         
             // execute the simulation kernel
+            auto sim_start = std::chrono::high_resolution_clock::now();
+
             simulation_kernel(gates);
+
+            auto sim_end = std::chrono::high_resolution_clock::now();
+
+            double elap_t = std::chrono::duration_cast<std::chrono::duration<double>>(sim_end - sim_start).count();
+
+            if(ec.print())
+            {
+                std::cout<<"Total Simulation Time:"<<elap_t<<"\n";
+                std::cout<<"Talied Time - Total Time:"<<elap_t - 
+                    (total_merge_exec + total_allocdealloc + total_gate_c1_set +
+                     total_gate_c2_set + total_c1_exec + total_c2_exec +
+                     total_svd_time + total_new_svd_set)<<"\n";
+                std::cout<<"Run Time Statistics:";
+                std::cout<<"Total C1 Gates: "<<total_c1_gate<<"\n";
+                std::cout<<"Total C2 Gates (local): "<<total_c2_gate_l<<"\n";
+                std::cout<<"Total C2 Gates (non-local): "<<total_c2_gate_nl<<"\n";
+
+                std::cout<<"Total Merge Execution Time: "<<total_merge_exec<<"\n";
+                std::cout<<"Total Allocation/Deallocation Time: "<<total_allocdealloc<<"\n";
+                std::cout<<"Total C1 Gate Set Time: "<<total_gate_c1_set<<"\n";
+                std::cout<<"Total C2 Gate Set Time: "<<total_gate_c2_set<<"\n";
+                std::cout<<"Total C1 Gate Execution Time: "<<total_c1_exec<<"\n";
+                std::cout<<"Total C2 Gate Execution Time: "<<total_c2_exec<<"\n";
+                std::cout<<"Total SVD Time: "<<total_svd_time<<"\n";
+                std::cout<<"Total New SVD Set Time: "<<total_new_svd_set<<"\n";
+
+                std::cout<<"Avg Merge Execution Time: "<<(total_merge_exec / total_c2_gate_l)<<"\n";
+                std::cout<<"Avg Allocation/Deallocation Time: "<<(total_allocdealloc / (total_c1_gate + total_c2_gate_l + total_c2_gate_nl))<<"\n";
+                std::cout<<"Avg C1 Gate Set Time: "<<(total_gate_c1_set / total_c1_gate)<<"\n";
+                std::cout<<"Avg C2 Gate Set Time: "<<(total_gate_c2_set / total_c2_gate_l)<<"\n";
+                std::cout<<"Avg C1 Gate Execution Time: "<<(total_c1_exec / total_c1_gate)<<"\n";
+                std::cout<<"Avg C2 Gate Execution Time: "<<(total_c2_exec / total_c2_gate_l)<<"\n";
+                std::cout<<"Avg SVD Time: "<<(total_svd_time / total_c2_gate_l)<<"\n";
+                std::cout<<"Avg New SVD Set Time: "<<(total_new_svd_set / total_c2_gate_l)<<"\n";
+
+
+            }
+
         }
 
 
@@ -242,22 +282,42 @@ namespace NWQSim
         }
 
     protected:
+        // hyperparameters
         IdxType n_qubits;
         IdxType* results = NULL;
         IdxType max_bond_dim;
         int block_size;
         double sv_cutoff;
-        tamm::ExecutionHW exec_hw;
 
+        // tamm variables
         tamm::ProcGroup pg;
         tamm::ExecutionContext ec;
+        tamm::Scheduler sch;
+        tamm::ExecutionHW exec_hw;
+
+        // tensor network variables
         std::vector<IdxType> bond_dims;
         std::vector<IdxType> phys_dims;
         std::vector<tamm::TiledIndexSpace> bond_tis;
         std::vector<tamm::TiledIndexSpace> phys_tis;
         std::vector<tamm::Tensor<Cplx>> mps_tensors;
-        tamm::Scheduler sch;
-        IdxType* result = nullptr;
+
+        // execution time statistics
+        double total_merge_exec = 0;
+        double total_allocdealloc = 0;
+        double total_gate_c1_set = 0;
+        double total_gate_c2_set = 0;
+        double total_c1_exec = 0;
+        double total_c2_exec = 0;
+        double total_svd_time = 0;
+        double total_new_svd_set = 0;
+
+        int total_c1_gate = 0;
+        int total_c2_gate_l = 0;
+        int total_c2_gate_nl = 0;
+
+
+
 
 
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
@@ -275,6 +335,7 @@ namespace NWQSim
                     {
                         U[idx] = Cplx(g.gm_real[idx], g.gm_imag[idx]);
                     }
+                    total_c1_gate++;
                     C1_GATE(U, g.qubit);
                 }
                 // two-qubit controlled gate
@@ -314,10 +375,15 @@ namespace NWQSim
         void C1_GATE(const std::array<Cplx, 4> &U, IdxType site)
         {
             // build the 2 by 2 gate tensor G
+            double G_alloc_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> G({phys_tis[site], phys_tis[site]});
             G.set_dense();
             G.allocate(&ec);
+            double G_alloc_end = std::chrono::high_resolution_clock::now();
+
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(G_alloc_end - G_alloc_time).count();
         
+            double G_set_time = std::chrono::high_resolution_clock::now();
             for (const auto &blockid : G.loop_nest())
             {
                 size_t bs = G.block_size(blockid);
@@ -341,21 +407,33 @@ namespace NWQSim
         
                 G.put(blockid, hostbuf);
             }
+            double G_set_end = std::chrono::high_resolution_clock::now();
+            total_gate_c1_set += std::chrono::duration_cast<std::chrono::duration<double>>(G_set_end - G_set_time).count();
+
         
             // apply the gate to the site tensor
             auto &T = mps_tensors[site];
+            double alloc_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> Tnew({bond_tis[site], phys_tis[site], bond_tis[site + 1]});
             Tnew.set_dense();
             Tnew.allocate(&ec);
+            double alloc_end = std::chrono::high_resolution_clock::now();
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_end - alloc_time).count();
         
+            double exec_time = std::chrono::high_resolution_clock::now();
             sch(Tnew("l","p'","r") = G("p'","p") * T("l","p","r"),
                 "apply_one_qubit", exec_hw);
             sch.execute(exec_hw);
+            double exec_end = std::chrono::high_resolution_clock::now();
+            total_c1_exec += std::chrono::duration_cast<std::chrono::duration<double>>(exec_end - exec_time).count();
         
             // replace old tensor and free memory
+            double dealloc_time = std::chrono::high_resolution_clock::now();
             T.deallocate();
             mps_tensors[site] = std::move(Tnew);
             G.deallocate();
+            double dealloc_end = std::chrono::high_resolution_clock::now();
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
         }
  
 
@@ -459,8 +537,8 @@ namespace NWQSim
         }
 
         /* Implementation of local 2 qubit gate
-         * 1) Allocate gate tensor
-         * 2) Merge the local sites
+         * 1) Merge the local sites
+         * 2) Build the gate tensor
          * 3) Apply gate tensor
          * 4) Apply SVD and concatenate bond dimension
          * 5) Reallocate tensors to mps sites*/
@@ -469,20 +547,30 @@ namespace NWQSim
             // merge tensors at sites q0 and q1
             IdxType Dl = bond_dims[q0];
             IdxType Dr = bond_dims[q1 + 1];
+            double alloc_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> M({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M.set_dense();
             M.allocate(&ec);
-
+            double alloc_end = std::chrono::high_resolution_clock::now();
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_end - alloc_time).count();
+        
+            double merge_time = std::chrono::high_resolution_clock::now();
             sch(M("l","p0","p1","r") =
                 mps_tensors[q0]("l","p0","b") *
                 mps_tensors[q1]("b","p1","r"),
                 "merge_two", exec_hw);
             sch.execute(exec_hw);
+            double merge_end = std::chrono::high_resolution_clock::now();
+            total_merge_exec += std::chrono::duration_cast<std::chrono::duration<double>>(merge_end - merge_time).count();
         
             // build two qubit gate tensor G4
+            double alloc_gate_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> G4({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
             G4.set_dense();
             G4.allocate(&ec);
+            double alloc_gate_end = std::chrono::high_resolution_clock::now();
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_gate_end - alloc_gate_time).count();
+            double set_gate_time = std::chrono::high_resolution_clock::now();
             for (const auto &blockid : G4.loop_nest())
             {
                 size_t bs = G4.block_size(blockid);
@@ -507,34 +595,33 @@ namespace NWQSim
                 }
                 G4.put(blockid, hostbuf);
             }
+            double set_gate_end = std::chrono::high_resolution_clock::now();
+            total_gate_c2_set += std::chrono::duration_cast<std::chrono::duration<double>>(set_gate_end - set_gate_time).count();
         
             // apply gate to merged tensor
+            double apply_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> M2({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M2.set_dense();
             M2.allocate(&ec);
-            if(pg.rank().value()==0)
-            {
-                std::cout<<"Bond Dimension:"<<bond_dims[q0]<<","<<bond_dims[q1 + 1]<<"\n";
-            }
-            auto t0 = std::chrono::high_resolution_clock::now();
+            double apply_end = std::chrono::high_resolution_clock::now();
+            total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(apply_end - apply_time).count();
 
+            double exec_time = std::chrono::high_resolution_clock::now();
             sch(M2("l","p0p","p1p","r") =
                  G4("p0p","p1p","p0","p1") * M("l","p0","p1","r"),
                  "apply_two", exec_hw);
             sch.execute(exec_hw);
+            double exec_end = std::chrono::high_resolution_clock::now();
+            total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(exec_end - exec_time).count();
 
-            auto t1 = std::chrono::high_resolution_clock::now();
-            double elap_t = std::chrono::duration_cast<std::chrono::duration<double>>(t1 - t0).count();
-            
-            if(pg.rank().value()==0)
-            {
-            std::cout<<"Merge Execution Time:"<<elap_t<<"\n";
-            }
-
+            double dealloc_time = std::chrono::high_resolution_clock::now();
             M.deallocate();
             G4.deallocate();
+            double dealloc_end = std::chrono::high_resolution_clock::now();
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
         
             // form matrix for singular value decomposition
+            double svd_time = std::chrono::high_resolution_clock::now();
             Eigen::Index rows = Dl * 2;
             Eigen::Index cols = 2 * Dr;
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> mat(rows, cols);
@@ -597,13 +684,19 @@ namespace NWQSim
                 tamm::IndexSpace is_new{tamm::range(chi)};
                 bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new, block_size);
             }
+            double svd_end = std::chrono::high_resolution_clock::now();
+            total_svd_time += std::chrono::duration_cast<std::chrono::duration<double>>(svd_end - svd_time).count();
         
             // build new left tensor Ti_new
+            double Ti_new_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> Ti_new({
                 bond_tis[q0], phys_tis[q0], tamm::TiledIndexSpace(tamm::range(chi), block_size)
             });
             Ti_new.set_dense();
-            Ti_new.allocate(&ec);
+            Ti_new.allocate(&ec);   
+            double Ti_new_end = std::chrono::high_resolution_clock::now();
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(Ti_new_end - Ti_new_time).count();
+            double Ti_new_set_time = std::chrono::high_resolution_clock::now();
             for (const auto &blockid : Ti_new.loop_nest())
             {
                 size_t bs = Ti_new.block_size(blockid);
@@ -623,8 +716,12 @@ namespace NWQSim
                 }
                 Ti_new.put(blockid, hostbuf);
             }
+
+            double Ti_new_set_end = std::chrono::high_resolution_clock::now();
+            total_new_svd_set += std::chrono::duration_cast<std::chrono::duration<double>>(Ti_new_set_end - Ti_new_set_time).count();
         
             // build new right tensor Tj_new
+            double Tj_new_time = std::chrono::high_resolution_clock::now();
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> SV = Sdiag * Vh;
             tamm::Tensor<Cplx> Tj_new({
                 tamm::TiledIndexSpace(tamm::range(chi), block_size), phys_tis[q1], bond_tis[q1 + 1]
@@ -650,13 +747,18 @@ namespace NWQSim
                 }
                 Tj_new.put(blockid, hostbuf);
             }
+            double Tj_new_end = std::chrono::high_resolution_clock::now();
+            total_new_svd_set += std::chrono::duration_cast<std::chrono::duration<double>>(Tj_new_end - Tj_new_time).count();
         
             // replace old tensors and free memory
+            double dealloc_time = std::chrono::high_resolution_clock::now();
             mps_tensors[q0].deallocate();
             mps_tensors[q1].deallocate();
             mps_tensors[q0] = std::move(Ti_new);
             mps_tensors[q1] = std::move(Tj_new);
             M2.deallocate();
+            double dealloc_end = std::chrono::high_resolution_clock::now();
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
         }
 
 
@@ -935,15 +1037,18 @@ namespace NWQSim
             // move qubit i forward until it is adjacent to j
             for (IdxType k = i; k < j - 1; ++k)
             {
+                total_c2_gate_l += 1;
                 C2_GATE_L(SWAP_U4, k, k + 1);
             }
         
             // apply the two qubit gate on the adjacent pair
+            total_c2_gate_l += 1;
             C2_GATE_L(U4_eff, j - 1, j);
         
             // undo the swaps to restore original qubit order
             for (IdxType k = j - 1; k > i; --k)
             {
+                total_c2_gate_l += 1;
                 C2_GATE_L(SWAP_U4, k - 1, k);
             }
         }
@@ -954,10 +1059,12 @@ namespace NWQSim
             // choose local or non-local implementation based on qubit adjacency
             if (std::abs(q0 - q1) == 1)
             {
+                total_c2_gate_l += 1;
                 C2_GATE_L(U4, q0, q1);
             }
             else
             {
+                total_c2_gate_nl += 1;
                 C2_GATE_NL_SWAP(U4, q0, q1);
             }
         }
