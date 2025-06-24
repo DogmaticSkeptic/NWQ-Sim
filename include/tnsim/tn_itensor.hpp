@@ -35,6 +35,18 @@ namespace NWQSim
 	    //temporary cpu_mem
 	    cpu_mem = 0.0;
 
+            // Initialize timing statistics
+            total_c1_exec = 0;
+            total_c2_exec = 0;
+            total_ma_exec = 0;
+            total_reset_exec = 0;
+            total_svd_time = 0;
+            total_c1_gate = 0;
+            total_c2_gate_l = 0;
+            total_c2_gate_nl = 0;
+            total_ma_gate = 0;
+            total_reset_gate = 0;
+
             // MPS Parameters
             MaxDim = int(max_dim);
             Cutoff = sv_cutoff;
@@ -105,6 +117,24 @@ namespace NWQSim
                 printf("n_qubits:%lld, n_gates:%lld, sim_gates:%lld, ncpus:%lld, comp:%.3lf ms, comm:%.3lf ms, sim:%.3lf ms, mem:%.3lf MB, mem_per_cpu:%.3lf MB\n",
                        n_qubits, origional_gates, n_gates, n_cpu, sim_time, 0.,
                        sim_time, cpu_mem / 1024 / 1024, cpu_mem / 1024 / 1024);
+                printf("Run Time Statistics:\n");
+                printf("Total C1 Gates: %d\n", total_c1_gate);
+                printf("Total C2 Gates (local): %d\n", total_c2_gate_l);
+                printf("Total C2 Gates (non-local): %d\n", total_c2_gate_nl);
+                printf("Total MA Gates: %d\n", total_ma_gate);
+                printf("Total RESET Gates: %d\n", total_reset_gate);
+                printf("Total C1 Gate Execution Time: %.3lf ms\n", total_c1_exec);
+                printf("Total C2 Gate Execution Time: %.3lf ms\n", total_c2_exec);
+                printf("Total MA Gate Execution Time: %.3lf ms\n", total_ma_exec);
+                printf("Total RESET Gate Execution Time: %.3lf ms\n", total_reset_exec);
+                printf("Total SVD Time (within C2): %.3lf ms\n", total_svd_time);
+
+                // Average times (avoid division by zero)
+                if (total_c1_gate > 0) printf("Avg C1 Gate Execution Time: %.3lf ms\n", total_c1_exec / total_c1_gate);
+                if (total_c2_gate_l + total_c2_gate_nl > 0) printf("Avg C2 Gate Execution Time: %.3lf ms\n", total_c2_exec / (total_c2_gate_l + total_c2_gate_nl));
+                if (total_ma_gate > 0) printf("Avg MA Gate Execution Time: %.3lf ms\n", total_ma_exec / total_ma_gate);
+                if (total_reset_gate > 0) printf("Avg RESET Gate Execution Time: %.3lf ms\n", total_reset_exec / total_reset_gate);
+                if (total_c2_gate_l + total_c2_gate_nl > 0) printf("Avg SVD Time (within C2): %.3lf ms\n", total_svd_time / (total_c2_gate_l + total_c2_gate_nl));
                 printf("=====================================\n");
             }
 
@@ -166,6 +196,19 @@ namespace NWQSim
         // CPU memory usage
         ValType cpu_mem;
 
+        // execution time statistics
+        double total_c1_exec = 0;
+        double total_c2_exec = 0;
+        double total_ma_exec = 0;
+        double total_reset_exec = 0;
+        double total_svd_time = 0; // For SVD operations within C2 gates
+
+        int total_c1_gate = 0;
+        int total_c2_gate_l = 0;
+        int total_c2_gate_nl = 0;
+        int total_ma_gate = 0;
+        int total_reset_gate = 0;
+
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int n_gates = gates.size();
@@ -175,6 +218,7 @@ namespace NWQSim
 
                 if (g.op_name == OP::C1)
                 {
+                    total_c1_gate++;
                     C1_GATE(g.gm_real, g.gm_imag, g.qubit);
                 }
                 else if (g.op_name == OP::C2)
@@ -183,6 +227,7 @@ namespace NWQSim
                 }
                 else if (g.op_name == OP::RESET)
                 {
+                    total_reset_gate++;
                     RESET_GATE(g.qubit);
                 }
                 else if (g.op_name == OP::M)
@@ -191,6 +236,7 @@ namespace NWQSim
                 }
                 else if (g.op_name == OP::MA)
                 {
+                    total_ma_gate++;
                     MA_GATE(g.qubit);
                 }
                 else if (g.op_name == OP::EXPECT)
@@ -219,6 +265,9 @@ namespace NWQSim
         // Arbitrary 1-qubit gate
         virtual void C1_GATE(const ValType *gm_real, const ValType *gm_imag, const IdxType qubit)
         {
+            cpu_timer timer;
+            timer.start_timer();
+
             // iTensor is 1 indexed
             int site = qubit + 1;
 
@@ -254,7 +303,8 @@ namespace NWQSim
             // // For safety re-orthogonalize the network
             // network.orthogonalize();
             
-
+            timer.stop_timer();
+            total_c1_exec += timer.measure();
         }
 
         //============== C2 Gate ================
@@ -262,6 +312,8 @@ namespace NWQSim
         virtual void C2_GATE(const ValType *gm_real, const ValType *gm_imag,
                              const IdxType qubit0, const IdxType qubit1)
         {
+            cpu_timer gate_timer;
+            gate_timer.start_timer();
 
             assert(qubit0 != qubit1); // Non-cloning
 
@@ -314,9 +366,14 @@ namespace NWQSim
 	    // method = false is MPO
             auto method = true;
             if(std::abs(qubit0 - qubit1) != 1){
+                total_c2_gate_nl++; // Increment non-local counter
                 //std::cout<<"Non local C2"<<std::endl;
                 // 2Q Gate Decomposition into Control: u  ;  Target: s*v
+                cpu_timer svd_timer;
+                svd_timer.start_timer();
                 auto [u,s,v] = itensor::svd(gate,{i,prime(i)},{j,prime(j)},{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});
+                svd_timer.stop_timer();
+                total_svd_time += svd_timer.measure();
                 auto sv = s*v;
 
                 if(method){
@@ -341,7 +398,10 @@ namespace NWQSim
                     // Decompose contraction, U is the new site tensor in the circuit network
                     // S*V holds the "propagating bond" which is "pushed" through the circuit to the target site
                     // This "bond" is the dangling link of the initial gate SVD
+                    svd_timer.start_timer();
                     auto [U,S,V] = itensor::svd(site0_contract,{i,prime(i),leftLinkIndex(network,site0)},{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});
+                    svd_timer.stop_timer();
+                    total_svd_time += svd_timer.measure();
                     network.set(site0,U);
                     network.position(site0);
                     propagating_bond =S*V;
@@ -351,14 +411,17 @@ namespace NWQSim
 
             
                     // Repeat propagation process through the intermediate sites
-                    for(auto i = site0+1 ; i < site1; i++ ){
+                    for(auto k = site0+1 ; k < site1; k++ ){
 
-                        auto i_contract = propagating_bond * network(i);
-                        auto [u,s,v] = itensor::svd(i_contract,{sites(i),lindex},{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});
-                        lindex = commonInds(u,s)[0];
-                        network.set(i,u);
-                        // network.position(i);
-                        propagating_bond = s*v;
+                        auto k_contract = propagating_bond * network(k);
+                        svd_timer.start_timer();
+                        auto [u_prop,s_prop,v_prop] = itensor::svd(k_contract,{sites(k),lindex},{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});
+                        svd_timer.stop_timer();
+                        total_svd_time += svd_timer.measure();
+                        lindex = commonInds(u_prop,s_prop)[0];
+                        network.set(k,u_prop);
+                        // network.position(k);
+                        propagating_bond = s_prop*v_prop;
 
                     }
    
@@ -374,7 +437,6 @@ namespace NWQSim
                 else{
                     // MPO Method
                     //
-
                     itensor::Index lright;
                     itensor::Index lleft;
                     network.position(1);
@@ -382,36 +444,36 @@ namespace NWQSim
                     auto gate_MPO = itensor::MPO(n_qubits);
                     auto lusv = commonInds(u,s)[0];
 
-                    for (auto i = 1; i<=n_qubits;i++){
-                        if(not((i == site0) || (i == site1))){
-                            if(i==1){
+                    for (auto k = 1; k<=n_qubits;k++){
+                        if(not((k == site0) || (k == site1))){
+                            if(k==1){
                                 lright = itensor::Index(4,"Link");
-                                auto diag1 = itensor::delta(sites(i),prime(sites(i)));
+                                auto diag1 = itensor::delta(sites(k),prime(sites(k)));
                                 auto diag2 = itensor::delta(lright);
                                 auto diag3 = toDense(diag2);
                                 auto temp = diag1 * diag3;
-                                gate_MPO.set(i,temp);
+                                gate_MPO.set(k,temp);
                             }
-                            else if( i==n_qubits){
+                            else if( k==n_qubits){
                                 lleft = lright;
-                                auto diag1 = itensor::delta(sites(i),prime(sites(i)));
+                                auto diag1 = itensor::delta(sites(k),prime(sites(k)));
                                 auto diag2 = itensor::delta(lleft);
                                 auto diag3 = toDense(diag2);
                                 auto temp = diag1 * diag3;
-                                gate_MPO.set(i,temp);
+                                gate_MPO.set(k,temp);
                             }
                             else{
                                 lleft = lright;
                                 lright = itensor::Index(4,"Link");
-                                auto diag1 = itensor::delta(sites(i),prime(sites(i)));
+                                auto diag1 = itensor::delta(sites(k),prime(sites(k)));
                                 auto diag2 = itensor::delta(lleft,lright);
                                 auto diag3 = toDense(diag2);
                                 auto temp = diag1 * diag3;
-                                gate_MPO.set(i,temp);
+                                gate_MPO.set(k,temp);
                             }
                         }
-                        else if(i==site0){
-                            if(not(i==1 or i==n_qubits)){
+                        else if(k==site0){
+                            if(not(k==1 or k==n_qubits)){
                                 lleft = lright;
                                 lright = lusv;
                                 gate_MPO.set(site0, u*itensor::delta(lleft));
@@ -421,8 +483,8 @@ namespace NWQSim
                                 gate_MPO.set(site0, u);
                             }
                         }
-                        else if(i==site1){
-                            if(not(i==1 or i==n_qubits)){
+                        else if(k==site1){
+                            if(not(k==1 or k==n_qubits)){
                                 lleft = lright;
                                 auto lsv = itensor::delta(lleft,lusv);
                                 lright = itensor::Index(4,"Link");
@@ -448,6 +510,7 @@ namespace NWQSim
 
             }
             else{
+                total_c2_gate_l++; // Increment local counter
                 // Local 2-qubit gate method
                 //
                 //std::cout<<"Local C2"<<std::endl;
@@ -488,7 +551,11 @@ namespace NWQSim
                 //    -------------
   
                 new_sites_contracted.noPrime();
+                cpu_timer svd_timer;
+                svd_timer.start_timer();
                 auto [u,s,v] = itensor::svd(new_sites_contracted ,itensor::inds(network(site0)),{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});    
+                svd_timer.stop_timer();
+                total_svd_time += svd_timer.measure();
                 network.set(site0, u);
                 network.set(site1, s*v);
 
@@ -497,6 +564,8 @@ namespace NWQSim
                 //
                 // network.orthogonalize();
             }
+            gate_timer.stop_timer();
+            total_c2_exec += gate_timer.measure();
         }
 
         //============== C4 Gate ================
@@ -516,6 +585,9 @@ namespace NWQSim
         //============== MA Gate (Measure all qubits in Pauli-Z) ================
         virtual void MA_GATE(const IdxType repetition)
         {
+            cpu_timer timer;
+            timer.start_timer();
+
             SAFE_FREE_HOST(results);
             SAFE_ALOC_HOST(results, sizeof(IdxType) * repetition);
             memset(results, 0, sizeof(IdxType) * repetition);
@@ -609,9 +681,9 @@ namespace NWQSim
 
 
                             auto temp_net = itensor::MPS(n_qubits-j);
-                            for (int i = 1;i<=(n_qubits-j);i++){
+                            for (int k = 1;k<=(n_qubits-j);k++){
                             
-                                temp_net.ref(i) = network_(i+1);}
+                                temp_net.ref(k) = network_(k+1);}
     
                             temp_net.set(1,temp);
                             network_ = temp_net;
@@ -635,9 +707,9 @@ namespace NWQSim
                  
                             auto temp_net = itensor::MPS(n_qubits-j);
               
-                            for (int i = 1;i<=(n_qubits-j);i++){
+                            for (int k = 1;k<=(n_qubits-j);k++){
                              
-                                temp_net.ref(i) = network_(i+1);}
+                                temp_net.ref(k) = network_(k+1);}
                     
                             temp_net.set(1,temp);
                           
@@ -658,6 +730,8 @@ namespace NWQSim
 		        }
 
             }
+            timer.stop_timer();
+            total_ma_exec += timer.measure();
         }
         virtual double EXPECT_C4_GATE(const ValType *gm_real, const ValType *gm_imag, IdxType qubit0, IdxType qubit1, IdxType qubit2, IdxType qubit3, IdxType mask)
         {
@@ -682,7 +756,12 @@ namespace NWQSim
         //============== Reset ================
         virtual void RESET_GATE(const IdxType qubit)
         {
+            cpu_timer timer;
+            timer.start_timer();
+            // Current implementation throws error. If implemented, add actual reset logic here.
             throw std::runtime_error("Not implemented");
+            // timer.stop_timer(); // This line will not be reached due to throw
+            // total_reset_exec += timer.measure();
         }
 
         //============== Purity Check  ================
