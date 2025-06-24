@@ -111,32 +111,29 @@ namespace NWQSim
             sim_time = sim_timer.measure();
             // std::cout<<"sim_time: "<<sim_time<<std::endl;
 
-            if (Config::PRINT_SIM_TRACE)
-            {
-                printf("\n============== TN-Sim ===============\n");
-                printf("n_qubits:%lld, n_gates:%lld, sim_gates:%lld, ncpus:%lld, comp:%.3lf ms, comm:%.3lf ms, sim:%.3lf ms, mem:%.3lf MB, mem_per_cpu:%.3lf MB\n",
-                       n_qubits, origional_gates, n_gates, n_cpu, sim_time, 0.,
-                       sim_time, cpu_mem / 1024 / 1024, cpu_mem / 1024 / 1024);
-                printf("Run Time Statistics:\n");
-                printf("Total C1 Gates: %d\n", total_c1_gate);
-                printf("Total C2 Gates (local): %d\n", total_c2_gate_l);
-                printf("Total C2 Gates (non-local): %d\n", total_c2_gate_nl);
-                printf("Total MA Gates: %d\n", total_ma_gate);
-                printf("Total RESET Gates: %d\n", total_reset_gate);
-                printf("Total C1 Gate Execution Time: %.3lf ms\n", total_c1_exec);
-                printf("Total C2 Gate Execution Time: %.3lf ms\n", total_c2_exec);
-                printf("Total MA Gate Execution Time: %.3lf ms\n", total_ma_exec);
-                printf("Total RESET Gate Execution Time: %.3lf ms\n", total_reset_exec);
-                printf("Total SVD Time (within C2): %.3lf ms\n", total_svd_time);
+            printf("\n============== TN-Sim ===============\n");
+            printf("n_qubits:%lld, n_gates:%lld, sim_gates:%lld, ncpus:%lld, comp:%.3lf ms, comm:%.3lf ms, sim:%.3lf ms, mem:%.3lf MB, mem_per_cpu:%.3lf MB\n",
+                   n_qubits, origional_gates, n_gates, n_cpu, sim_time, 0.,
+                   sim_time, cpu_mem / 1024 / 1024, cpu_mem / 1024 / 1024);
+            printf("Run Time Statistics:\n");
+            printf("Total C1 Gates: %d\n", total_c1_gate);
+            printf("Total C2 Gates (local): %d\n", total_c2_gate_l);
+            printf("Total C2 Gates (non-local): %d\n", total_c2_gate_nl);
+            printf("Total MA Gates: %d\n", total_ma_gate);
+            printf("Total RESET Gates: %d\n", total_reset_gate);
+            printf("Total C1 Gate Execution Time: %.3lf ms\n", total_c1_exec);
+            printf("Total C2 Gate Execution Time: %.3lf ms\n", total_c2_exec);
+            printf("Total MA Gate Execution Time: %.3lf ms\n", total_ma_exec);
+            printf("Total RESET Gate Execution Time: %.3lf ms\n", total_reset_exec);
+            printf("Total SVD Time (within C2): %.3lf ms\n", total_svd_time);
 
-                // Average times (avoid division by zero)
-                if (total_c1_gate > 0) printf("Avg C1 Gate Execution Time: %.3lf ms\n", total_c1_exec / total_c1_gate);
-                if (total_c2_gate_l + total_c2_gate_nl > 0) printf("Avg C2 Gate Execution Time: %.3lf ms\n", total_c2_exec / (total_c2_gate_l + total_c2_gate_nl));
-                if (total_ma_gate > 0) printf("Avg MA Gate Execution Time: %.3lf ms\n", total_ma_exec / total_ma_gate);
-                if (total_reset_gate > 0) printf("Avg RESET Gate Execution Time: %.3lf ms\n", total_reset_exec / total_reset_gate);
-                if (total_c2_gate_l + total_c2_gate_nl > 0) printf("Avg SVD Time (within C2): %.3lf ms\n", total_svd_time / (total_c2_gate_l + total_c2_gate_nl));
-                printf("=====================================\n");
-            }
+            // Average times (avoid division by zero)
+            if (total_c1_gate > 0) printf("Avg C1 Gate Execution Time: %.3lf ms\n", total_c1_exec / total_c1_gate);
+            if (total_c2_gate_l + total_c2_gate_nl > 0) printf("Avg C2 Gate Execution Time: %.3lf ms\n", total_c2_exec / (total_c2_gate_l + total_c2_gate_nl));
+            if (total_ma_gate > 0) printf("Avg MA Gate Execution Time: %.3lf ms\n", total_ma_exec / total_ma_gate);
+            if (total_reset_gate > 0) printf("Avg RESET Gate Execution Time: %.3lf ms\n", total_reset_exec / total_reset_gate);
+            if (total_c2_gate_l + total_c2_gate_nl > 0) printf("Avg SVD Time (within C2): %.3lf ms\n", total_svd_time / (total_c2_gate_l + total_c2_gate_nl));
+            printf("=====================================\n");
 
             //=========================================
         }
