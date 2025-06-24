@@ -512,7 +512,10 @@ namespace NWQSim
             tamm::Tensor<Cplx> M2({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M2.set_dense();
             M2.allocate(&ec);
-            std::cout<<"Bond Dimension:"<<bond_dims[q0]<<","<<bond_dims[q1 + 1]<<"\n";
+            if(pg.rank().value()==0)
+            {
+                std::cout<<"Bond Dimension:"<<bond_dims[q0]<<","<<bond_dims[q1 + 1]<<"\n";
+            }
             auto t0 = std::chrono::high_resolution_clock::now();
 
             sch(M2("l","p0p","p1p","r") =
@@ -523,9 +526,10 @@ namespace NWQSim
             auto t1 = std::chrono::high_resolution_clock::now();
             double elap_t = std::chrono::duration_cast<std::chrono::duration<double>>(t1 - t0).count();
             
+            if(pg.rank().value()==0)
+            {
             std::cout<<"Merge Execution Time:"<<elap_t<<"\n";
-
-
+            }
 
             M.deallocate();
             G4.deallocate();
