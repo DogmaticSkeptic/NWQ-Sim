@@ -375,15 +375,15 @@ namespace NWQSim
         void C1_GATE(const std::array<Cplx, 4> &U, IdxType site)
         {
             // build the 2 by 2 gate tensor G
-            double G_alloc_time = std::chrono::high_resolution_clock::now();
+            auto G_alloc_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> G({phys_tis[site], phys_tis[site]});
             G.set_dense();
             G.allocate(&ec);
-            double G_alloc_end = std::chrono::high_resolution_clock::now();
+            auto G_alloc_end = std::chrono::high_resolution_clock::now();
 
             total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(G_alloc_end - G_alloc_time).count();
         
-            double G_set_time = std::chrono::high_resolution_clock::now();
+            auto G_set_time = std::chrono::high_resolution_clock::now();
             for (const auto &blockid : G.loop_nest())
             {
                 size_t bs = G.block_size(blockid);
@@ -407,32 +407,32 @@ namespace NWQSim
         
                 G.put(blockid, hostbuf);
             }
-            double G_set_end = std::chrono::high_resolution_clock::now();
+            auto G_set_end = std::chrono::high_resolution_clock::now();
             total_gate_c1_set += std::chrono::duration_cast<std::chrono::duration<double>>(G_set_end - G_set_time).count();
 
         
             // apply the gate to the site tensor
             auto &T = mps_tensors[site];
-            double alloc_time = std::chrono::high_resolution_clock::now();
+            auto alloc_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> Tnew({bond_tis[site], phys_tis[site], bond_tis[site + 1]});
             Tnew.set_dense();
             Tnew.allocate(&ec);
-            double alloc_end = std::chrono::high_resolution_clock::now();
+            auto alloc_end = std::chrono::high_resolution_clock::now();
             total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_end - alloc_time).count();
         
-            double exec_time = std::chrono::high_resolution_clock::now();
+            auto exec_time = std::chrono::high_resolution_clock::now();
             sch(Tnew("l","p'","r") = G("p'","p") * T("l","p","r"),
                 "apply_one_qubit", exec_hw);
             sch.execute(exec_hw);
-            double exec_end = std::chrono::high_resolution_clock::now();
+            auto exec_end = std::chrono::high_resolution_clock::now();
             total_c1_exec += std::chrono::duration_cast<std::chrono::duration<double>>(exec_end - exec_time).count();
         
             // replace old tensor and free memory
-            double dealloc_time = std::chrono::high_resolution_clock::now();
+            auto dealloc_time = std::chrono::high_resolution_clock::now();
             T.deallocate();
             mps_tensors[site] = std::move(Tnew);
             G.deallocate();
-            double dealloc_end = std::chrono::high_resolution_clock::now();
+            auto dealloc_end = std::chrono::high_resolution_clock::now();
             total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
         }
  
@@ -547,30 +547,30 @@ namespace NWQSim
             // merge tensors at sites q0 and q1
             IdxType Dl = bond_dims[q0];
             IdxType Dr = bond_dims[q1 + 1];
-            double alloc_time = std::chrono::high_resolution_clock::now();
+            auto alloc_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> M({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M.set_dense();
             M.allocate(&ec);
-            double alloc_end = std::chrono::high_resolution_clock::now();
+            auto alloc_end = std::chrono::high_resolution_clock::now();
             total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_end - alloc_time).count();
         
-            double merge_time = std::chrono::high_resolution_clock::now();
+            auto merge_time = std::chrono::high_resolution_clock::now();
             sch(M("l","p0","p1","r") =
                 mps_tensors[q0]("l","p0","b") *
                 mps_tensors[q1]("b","p1","r"),
                 "merge_two", exec_hw);
             sch.execute(exec_hw);
-            double merge_end = std::chrono::high_resolution_clock::now();
+            auto merge_end = std::chrono::high_resolution_clock::now();
             total_merge_exec += std::chrono::duration_cast<std::chrono::duration<double>>(merge_end - merge_time).count();
         
             // build two qubit gate tensor G4
-            double alloc_gate_time = std::chrono::high_resolution_clock::now();
+            auto alloc_gate_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> G4({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
             G4.set_dense();
             G4.allocate(&ec);
-            double alloc_gate_end = std::chrono::high_resolution_clock::now();
+            auto alloc_gate_end = std::chrono::high_resolution_clock::now();
             total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_gate_end - alloc_gate_time).count();
-            double set_gate_time = std::chrono::high_resolution_clock::now();
+            auto set_gate_time = std::chrono::high_resolution_clock::now();
             for (const auto &blockid : G4.loop_nest())
             {
                 size_t bs = G4.block_size(blockid);
@@ -595,33 +595,33 @@ namespace NWQSim
                 }
                 G4.put(blockid, hostbuf);
             }
-            double set_gate_end = std::chrono::high_resolution_clock::now();
+            auto set_gate_end = std::chrono::high_resolution_clock::now();
             total_gate_c2_set += std::chrono::duration_cast<std::chrono::duration<double>>(set_gate_end - set_gate_time).count();
         
             // apply gate to merged tensor
-            double apply_time = std::chrono::high_resolution_clock::now();
+            auto apply_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> M2({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M2.set_dense();
             M2.allocate(&ec);
-            double apply_end = std::chrono::high_resolution_clock::now();
+            auto apply_end = std::chrono::high_resolution_clock::now();
             total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(apply_end - apply_time).count();
 
-            double exec_time = std::chrono::high_resolution_clock::now();
+            auto exec_time = std::chrono::high_resolution_clock::now();
             sch(M2("l","p0p","p1p","r") =
                  G4("p0p","p1p","p0","p1") * M("l","p0","p1","r"),
                  "apply_two", exec_hw);
             sch.execute(exec_hw);
-            double exec_end = std::chrono::high_resolution_clock::now();
+            auto exec_end = std::chrono::high_resolution_clock::now();
             total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(exec_end - exec_time).count();
 
-            double dealloc_time = std::chrono::high_resolution_clock::now();
+            auto dealloc_time = std::chrono::high_resolution_clock::now();
             M.deallocate();
             G4.deallocate();
-            double dealloc_end = std::chrono::high_resolution_clock::now();
+            auto dealloc_end = std::chrono::high_resolution_clock::now();
             total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
         
             // form matrix for singular value decomposition
-            double svd_time = std::chrono::high_resolution_clock::now();
+            auto svd_time = std::chrono::high_resolution_clock::now();
             Eigen::Index rows = Dl * 2;
             Eigen::Index cols = 2 * Dr;
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> mat(rows, cols);
@@ -684,19 +684,19 @@ namespace NWQSim
                 tamm::IndexSpace is_new{tamm::range(chi)};
                 bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new, block_size);
             }
-            double svd_end = std::chrono::high_resolution_clock::now();
+            auto svd_end = std::chrono::high_resolution_clock::now();
             total_svd_time += std::chrono::duration_cast<std::chrono::duration<double>>(svd_end - svd_time).count();
         
             // build new left tensor Ti_new
-            double Ti_new_time = std::chrono::high_resolution_clock::now();
+            auto Ti_new_time = std::chrono::high_resolution_clock::now();
             tamm::Tensor<Cplx> Ti_new({
                 bond_tis[q0], phys_tis[q0], tamm::TiledIndexSpace(tamm::range(chi), block_size)
             });
             Ti_new.set_dense();
             Ti_new.allocate(&ec);   
-            double Ti_new_end = std::chrono::high_resolution_clock::now();
+            auto Ti_new_end = std::chrono::high_resolution_clock::now();
             total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(Ti_new_end - Ti_new_time).count();
-            double Ti_new_set_time = std::chrono::high_resolution_clock::now();
+            auto Ti_new_set_time = std::chrono::high_resolution_clock::now();
             for (const auto &blockid : Ti_new.loop_nest())
             {
                 size_t bs = Ti_new.block_size(blockid);
@@ -717,11 +717,11 @@ namespace NWQSim
                 Ti_new.put(blockid, hostbuf);
             }
 
-            double Ti_new_set_end = std::chrono::high_resolution_clock::now();
+            auto Ti_new_set_end = std::chrono::high_resolution_clock::now();
             total_new_svd_set += std::chrono::duration_cast<std::chrono::duration<double>>(Ti_new_set_end - Ti_new_set_time).count();
         
             // build new right tensor Tj_new
-            double Tj_new_time = std::chrono::high_resolution_clock::now();
+            auto Tj_new_time = std::chrono::high_resolution_clock::now();
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> SV = Sdiag * Vh;
             tamm::Tensor<Cplx> Tj_new({
                 tamm::TiledIndexSpace(tamm::range(chi), block_size), phys_tis[q1], bond_tis[q1 + 1]
@@ -747,17 +747,17 @@ namespace NWQSim
                 }
                 Tj_new.put(blockid, hostbuf);
             }
-            double Tj_new_end = std::chrono::high_resolution_clock::now();
+            auto Tj_new_end = std::chrono::high_resolution_clock::now();
             total_new_svd_set += std::chrono::duration_cast<std::chrono::duration<double>>(Tj_new_end - Tj_new_time).count();
         
             // replace old tensors and free memory
-            double dealloc_time = std::chrono::high_resolution_clock::now();
+            auto dealloc_time = std::chrono::high_resolution_clock::now();
             mps_tensors[q0].deallocate();
             mps_tensors[q1].deallocate();
             mps_tensors[q0] = std::move(Ti_new);
             mps_tensors[q1] = std::move(Tj_new);
             M2.deallocate();
-            double dealloc_end = std::chrono::high_resolution_clock::now();
+            auto dealloc_end = std::chrono::high_resolution_clock::now();
             total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
         }
 
