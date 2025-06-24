@@ -751,14 +751,14 @@ namespace NWQSim
             total_new_svd_set += std::chrono::duration_cast<std::chrono::duration<double>>(Tj_new_end - Tj_new_time).count();
         
             // replace old tensors and free memory
-            auto dealloc_time = std::chrono::high_resolution_clock::now();
+            auto replace_time = std::chrono::high_resolution_clock::now();
             mps_tensors[q0].deallocate();
             mps_tensors[q1].deallocate();
             mps_tensors[q0] = std::move(Ti_new);
             mps_tensors[q1] = std::move(Tj_new);
             M2.deallocate();
-            auto dealloc_end = std::chrono::high_resolution_clock::now();
-            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
+            auto replace_end = std::chrono::high_resolution_clock::now();
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(replace_end - replace_time).count();
         }
 
 
