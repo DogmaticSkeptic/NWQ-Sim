@@ -385,6 +385,13 @@ namespace NWQSim
             auto gate_set_end = std::chrono::high_resolution_clock::now();
             total_gate_c2_set += std::chrono::duration_cast<std::chrono::duration<double>>(gate_set_end - gate_set_start).count();
 
+            // Declare timing variables for execution, SVD, and tensor set
+            std::chrono::high_resolution_clock::time_point svd_start;
+            std::chrono::high_resolution_clock::time_point svd_end;
+            std::chrono::high_resolution_clock::time_point c2_exec_start;
+            std::chrono::high_resolution_clock::time_point c2_exec_end;
+            std::chrono::high_resolution_clock::time_point c2_tensor_set_start;
+            std::chrono::high_resolution_clock::time_point c2_tensor_set_end;
             //
             // Non-adjacent / Non-local 2-qubit gates
             //
@@ -399,9 +406,9 @@ namespace NWQSim
                 auto nl_start_time = std::chrono::high_resolution_clock::now();
 
                 // 2Q Gate Decomposition into Control: u  ;  Target: s*v
-                auto svd_start = std::chrono::high_resolution_clock::now();
+                svd_start = std::chrono::high_resolution_clock::now();
                 auto [u,s,v] = itensor::svd(gate,{i,prime(i)},{j,prime(j)},{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});
-                auto svd_end = std::chrono::high_resolution_clock::now();
+                svd_end = std::chrono::high_resolution_clock::now();
                 total_svd_time += std::chrono::duration_cast<std::chrono::duration<double>>(svd_end - svd_start).count();
                 auto sv = s*v;
 
@@ -422,9 +429,9 @@ namespace NWQSim
 
       
                     // Initial contraction of control "gate" and control qubit
-                    auto c2_exec_start = std::chrono::high_resolution_clock::now();
+                    c2_exec_start = std::chrono::high_resolution_clock::now();
                     auto site0_contract = u*network(site0);
-                    auto c2_exec_end = std::chrono::high_resolution_clock::now();
+                    c2_exec_end = std::chrono::high_resolution_clock::now();
                     total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(c2_exec_end - c2_exec_start).count();
 
                     // Decompose contraction, U is the new site tensor in the circuit network
@@ -435,11 +442,11 @@ namespace NWQSim
                     svd_end = std::chrono::high_resolution_clock::now();
                     total_svd_time += std::chrono::duration_cast<std::chrono::duration<double>>(svd_end - svd_start).count();
 
-                    auto c2_tensor_set_start = std::chrono::high_resolution_clock::now();
+                    c2_tensor_set_start = std::chrono::high_resolution_clock::now();
                     network.set(site0,U);
                     network.position(site0);
                     propagating_bond =S*V;
-                    auto c2_tensor_set_end = std::chrono::high_resolution_clock::now();
+                    c2_tensor_set_end = std::chrono::high_resolution_clock::now();
                     total_c2_tensor_set += std::chrono::duration_cast<std::chrono::duration<double>>(c2_tensor_set_end - c2_tensor_set_start).count();
                 
                     // Track link index to insure correct indices are contracted at each step
@@ -478,7 +485,7 @@ namespace NWQSim
                     // Target site is set to new values
                     c2_tensor_set_start = std::chrono::high_resolution_clock::now();
                     network.set(site1,site1_contract);
-                    auto c2_tensor_set_end = std::chrono::high_resolution_clock::now();
+                    c2_tensor_set_end = std::chrono::high_resolution_clock::now();
                     total_c2_tensor_set += std::chrono::duration_cast<std::chrono::duration<double>>(c2_tensor_set_end - c2_tensor_set_start).count();
 
                     // network clean-up is performed after else statement
@@ -599,9 +606,9 @@ namespace NWQSim
                 //    --------
                 //   | sites  |
                 //    --------
-                auto c2_exec_start = std::chrono::high_resolution_clock::now();
+                c2_exec_start = std::chrono::high_resolution_clock::now();
                 auto new_sites_contracted = gate*contract_location;
-                auto c2_exec_end = std::chrono::high_resolution_clock::now();
+                c2_exec_end = std::chrono::high_resolution_clock::now();
                 total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(c2_exec_end - c2_exec_start).count();
                 //
                 //      |       |
@@ -611,15 +618,15 @@ namespace NWQSim
   
                 new_sites_contracted.noPrime();
                 
-                auto svd_start = std::chrono::high_resolution_clock::now();
+                svd_start = std::chrono::high_resolution_clock::now();
                 auto [u,s,v] = itensor::svd(new_sites_contracted ,itensor::inds(network(site0)),{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});    
-                auto svd_end = std::chrono::high_resolution_clock::now();
+                svd_end = std::chrono::high_resolution_clock::now();
                 total_svd_time += std::chrono::duration_cast<std::chrono::duration<double>>(svd_end - svd_start).count();
 
-                auto c2_tensor_set_start = std::chrono::high_resolution_clock::now();
+                c2_tensor_set_start = std::chrono::high_resolution_clock::now();
                 network.set(site0, u);
                 network.set(site1, s*v);
-                auto c2_tensor_set_end = std::chrono::high_resolution_clock::now();
+                c2_tensor_set_end = std::chrono::high_resolution_clock::now();
                 total_c2_tensor_set += std::chrono::duration_cast<std::chrono::duration<double>>(c2_tensor_set_end - c2_tensor_set_start).count();
 
                 //    |      |
@@ -791,7 +798,6 @@ namespace NWQSim
 
             }
             auto ma_end = std::chrono::high_resolution_clock::now();
-            total_ma_exec += std::chrono::duration_cast<std::chrono::duration<double>>(ma_end - ma_start).count();
         }
         virtual double EXPECT_C4_GATE(const ValType *gm_real, const ValType *gm_imag, IdxType qubit0, IdxType qubit1, IdxType qubit2, IdxType qubit3, IdxType mask)
         {
