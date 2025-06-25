@@ -391,7 +391,7 @@ namespace NWQSim
                 else if (g.op_name == OP::MA)
                 {
                     auto ma_start = std::chrono::high_resolution_clock::now();
-                    MA_GATE(g.qubit);
+                    //MA_GATE(g.qubit);
                     auto ma_end = std::chrono::high_resolution_clock::now();
                     total_ma_time += std::chrono::duration_cast<std::chrono::duration<double>>(ma_end - ma_start).count();
                 }
