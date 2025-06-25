@@ -32,20 +32,8 @@ namespace NWQSim
             n_qubits = _n_qubits;
             n_cpu = 1;
 
-	    //temporary cpu_mem
-	    cpu_mem = 0.0;
-
-            // Initialize timing statistics
-            total_c1_exec = 0;
-            total_c2_exec = 0;
-            total_ma_exec = 0;
-            total_reset_exec = 0;
-            total_svd_time = 0;
-            total_c1_gate = 0;
-            total_c2_gate_l = 0;
-            total_c2_gate_nl = 0;
-            total_ma_gate = 0;
-            total_reset_gate = 0;
+    	    //temporary cpu_mem
+    	    cpu_mem = 0.0;
 
             // MPS Parameters
             MaxDim = int(max_dim);
@@ -54,9 +42,9 @@ namespace NWQSim
             rng.seed(Config::RANDOM_SEED);
 
             // ITensor MPS Initialization
-	    auto sites = itensor::SpinHalf(int(n_qubits),{"ConserveQNs=", false});
+    	    auto sites = itensor::SpinHalf(int(n_qubits),{"ConserveQNs=", false});
     	    auto state = itensor::InitState(sites,"Up");
-	    auto network = itensor::MPS(state);
+    	    auto network = itensor::MPS(state);
 
         }
 
@@ -111,31 +99,35 @@ namespace NWQSim
             sim_time = sim_timer.measure();
             // std::cout<<"sim_time: "<<sim_time<<std::endl;
 
-            printf("\n============== TN-Sim ===============\n");
-            printf("n_qubits:%lld, n_gates:%lld, sim_gates:%lld, ncpus:%lld, comp:%.3lf ms, comm:%.3lf ms, sim:%.3lf ms, mem:%.3lf MB, mem_per_cpu:%.3lf MB\n",
-                   n_qubits, origional_gates, n_gates, n_cpu, sim_time, 0.,
-                   sim_time, cpu_mem / 1024 / 1024, cpu_mem / 1024 / 1024);
-            printf("Run Time Statistics:\n");
-            printf("Total C1 Gates: %d\n", total_c1_gate);
-            printf("Total C2 Gates (local): %d\n", total_c2_gate_l);
-            printf("Total C2 Gates (non-local): %d\n", total_c2_gate_nl);
-            printf("Total MA Gates: %d\n", total_ma_gate);
-            printf("Total RESET Gates: %d\n", total_reset_gate);
-            printf("Total C1 Gate Execution Time: %.3lf ms\n", total_c1_exec);
-            printf("Total C2 Gate Execution Time: %.3lf ms\n", total_c2_exec);
-            printf("Total MA Gate Execution Time: %.3lf ms\n", total_ma_exec);
-            printf("Total RESET Gate Execution Time: %.3lf ms\n", total_reset_exec);
-            printf("Total SVD Time (within C2): %.3lf ms\n", total_svd_time);
+            std::cout<<"Total Simulation Time:"<<elap_t<<"\n";
+            std::cout<<"Total Time - Tallied Time:"<<elap_t - 
+                (total_c2_merge + total_allocdealloc + total_gate_c1_set +
+                 total_gate_c2_set + total_c1_exec + total_c2_exec +
+                 total_svd_time + total_new_svd_set)<<"\n";
+            std::cout<<"Run Time Statistics:";
+            std::cout<<"Total C1 Gates: "<<total_c1_gate<<"\n";
+            std::cout<<"Total C2 Gates (local): "<<total_c2_gate_l<<"\n";
+            std::cout<<"Total C2 Gates (non-local): "<<total_c2_gate_nl<<"\n";
 
-            // Average times (avoid division by zero)
-            if (total_c1_gate > 0) printf("Avg C1 Gate Execution Time: %.3lf ms\n", total_c1_exec / total_c1_gate);
-            if (total_c2_gate_l + total_c2_gate_nl > 0) printf("Avg C2 Gate Execution Time: %.3lf ms\n", total_c2_exec / (total_c2_gate_l + total_c2_gate_nl));
-            if (total_ma_gate > 0) printf("Avg MA Gate Execution Time: %.3lf ms\n", total_ma_exec / total_ma_gate);
-            if (total_reset_gate > 0) printf("Avg RESET Gate Execution Time: %.3lf ms\n", total_reset_exec / total_reset_gate);
-            if (total_c2_gate_l + total_c2_gate_nl > 0) printf("Avg SVD Time (within C2): %.3lf ms\n", total_svd_time / (total_c2_gate_l + total_c2_gate_nl));
-            printf("=====================================\n");
+            std::cout<<"Total Merge Execution Time: "<<total_c2_merge<<"\n";
+            std::cout<<"Total Allocation/Deallocation Time: "<<total_allocdealloc<<"\n";
+            std::cout<<"Total C1 Gate Set Time: "<<total_gate_c1_set<<"\n";
+            std::cout<<"Total C2 Gate Set Time: "<<total_gate_c2_set<<"\n";
+            std::cout<<"Total C1 Gate Execution Time: "<<total_c1_exec<<"\n";
+            std::cout<<"Total C2 Gate Execution Time: "<<total_c2_exec<<"\n";
+            std::cout<<"Total SVD Time: "<<total_svd_time<<"\n";
+            std::cout<<"Total C2 Tensor Set: "<<total_c2_tensor_set<<"\n";
+            std::cout<<"Total C2 Non-Local Time: "<<total_c2_nl_time<<"\n";
 
-            //=========================================
+            std::cout<<"Avg Merge Execution Time: "<<(total_c2_merge / total_c2_gate_l)<<"\n";
+            std::cout<<"Avg Allocation/Deallocation Time: "<<(total_allocdealloc / (total_c1_gate + total_c2_gate_l + total_c2_gate_nl))<<"\n";
+            std::cout<<"Avg C1 Gate Set Time: "<<(total_gate_c1_set / total_c1_gate)<<"\n";
+            std::cout<<"Avg C2 Gate Set Time: "<<(total_gate_c2_set / total_c2_gate_l)<<"\n";
+            std::cout<<"Avg C1 Gate Execution Time: "<<(total_c1_exec / total_c1_gate)<<"\n";
+            std::cout<<"Avg C2 Gate Execution Time: "<<(total_c2_exec / total_c2_gate_l)<<"\n";
+            std::cout<<"Avg SVD Time: "<<(total_svd_time / total_c2_gate_l)<<"\n";
+            std::cout<<"Avg C2 Tensor Set: "<<(total_c2_tensor_set / total_c2_gate_l)<<"\n";
+            std::cout<<"Avg C2 Non-Local Time: "<<(total_c2_nl_time / total_c2_gate_nl)<<"\n";
         }
 
         IdxType *get_results() override
@@ -194,17 +186,22 @@ namespace NWQSim
         ValType cpu_mem;
 
         // execution time statistics
+        double total_allocdealloc = 0;
+        double total_gate_c1_set = 0;
         double total_c1_exec = 0;
+        double total_c1_tensor_set = 0;
+
+        double total_gate_c2_set = 0;
+        double total_c2_merge = 0;
         double total_c2_exec = 0;
-        double total_ma_exec = 0;
-        double total_reset_exec = 0;
-        double total_svd_time = 0; // For SVD operations within C2 gates
+        double total_svd_time = 0;
+        double total_c2_tensor_set = 0;
+
+        double total_c2_nl_time = 0;
 
         int total_c1_gate = 0;
         int total_c2_gate_l = 0;
         int total_c2_gate_nl = 0;
-        int total_ma_gate = 0;
-        int total_reset_gate = 0;
 
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
@@ -224,7 +221,6 @@ namespace NWQSim
                 }
                 else if (g.op_name == OP::RESET)
                 {
-                    total_reset_gate++;
                     RESET_GATE(g.qubit);
                 }
                 else if (g.op_name == OP::M)
@@ -233,7 +229,6 @@ namespace NWQSim
                 }
                 else if (g.op_name == OP::MA)
                 {
-                    total_ma_gate++;
                     MA_GATE(g.qubit);
                 }
                 else if (g.op_name == OP::EXPECT)
@@ -273,10 +268,13 @@ namespace NWQSim
             auto gate = itensor::ITensor(prime(j),j);
 
             // Set values of C1 gate tensor
+            auto c1_gate_set = std::chrono::high_resolution_clock::now();
             gate.set(1,1,std::complex<double>(gm_real[0],gm_imag[0]));
             gate.set(1,2,std::complex<double>(gm_real[1],gm_imag[1]));
             gate.set(2,1,std::complex<double>(gm_real[2],gm_imag[2]));
             gate.set(2,2,std::complex<double>(gm_real[3],gm_imag[3]));
+            auto c1_gate_set_end = std::chrono::high_resolution_clock::now();
+            total_gate_c1_set += std::chrono::duration<double>(c1_gate_set_end - c1_gate_set).count();
 
             // Move center of orthongality to qubit that will be contracted with gate
             if(isOrtho(network)){
@@ -289,7 +287,10 @@ namespace NWQSim
             }
          
             //Contract the 1-qubit gate with the MPS site at the qubit
+            auto c1_exec = std::chrono::high_resolution_clock::now();
             auto temp = gate * network(site);
+            auto c1_exec_end = std::chrono::high_resolution_clock::now();
+            total_c1_exec += std::chrono::duration<double>(c1_exec_end - c1_exec).count();
           
             temp.noPrime();
   
