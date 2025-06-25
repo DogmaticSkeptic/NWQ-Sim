@@ -98,63 +98,60 @@ namespace NWQSim
             auto sim_end = std::chrono::high_resolution_clock::now();
             double elap_t = std::chrono::duration_cast<std::chrono::duration<double>>(sim_end - sim_start).count();
 
-            if (Config::PRINT_SIM_TRACE)
-            {
-                std::cout<<"Total Simulation Time:"<<elap_t<<"\n";
-                std::cout<<"Total Time - Tallied Time:"<<elap_t - 
-                    (total_c2_merge + total_allocdealloc + total_gate_c1_set +
-                     total_gate_c2_set + total_c1_exec + total_c2_exec +
-                     total_svd_time + total_c2_tensor_set + total_c1_tensor_set)<<"\n";
-                std::cout<<"Run Time Statistics:";
-                std::cout<<"Total C1 Gates: "<<total_c1_gate<<"\n";
-                std::cout<<"Total C2 Gates (local): "<<total_c2_gate_l<<"\n";
-                std::cout<<"Total C2 Gates (non-local): "<<total_c2_gate_nl<<"\n";
+            std::cout<<"Total Simulation Time:"<<elap_t<<"\n";
+            std::cout<<"Total Time - Tallied Time:"<<elap_t - 
+                (total_c2_merge + total_allocdealloc + total_gate_c1_set +
+                 total_gate_c2_set + total_c1_exec + total_c2_exec +
+                 total_svd_time + total_c2_tensor_set + total_c1_tensor_set)<<"\n";
+            std::cout<<"Run Time Statistics:";
+            std::cout<<"Total C1 Gates: "<<total_c1_gate<<"\n";
+            std::cout<<"Total C2 Gates (local): "<<total_c2_gate_l<<"\n";
+            std::cout<<"Total C2 Gates (non-local): "<<total_c2_gate_nl<<"\n";
 
-                std::cout<<"Total Merge Execution Time: "<<total_c2_merge<<"\n";
-                std::cout<<"Total Allocation/Deallocation Time: "<<total_allocdealloc<<"\n";
-                std::cout<<"Total C1 Gate Set Time: "<<total_gate_c1_set<<"\n";
-                std::cout<<"Total C2 Gate Set Time: "<<total_gate_c2_set<<"\n";
-                std::cout<<"Total C1 Gate Execution Time: "<<total_c1_exec<<"\n";
-                std::cout<<"Total C2 Gate Execution Time: "<<total_c2_exec<<"\n";
-                std::cout<<"Total SVD Time: "<<total_svd_time<<"\n";
-                std::cout<<"Total C2 Tensor Set: "<<total_c2_tensor_set<<"\n";
-                std::cout<<"Total C2 Non-Local Time: "<<total_c2_nl_time<<"\n";
+            std::cout<<"Total Merge Execution Time: "<<total_c2_merge<<"\n";
+            std::cout<<"Total Allocation/Deallocation Time: "<<total_allocdealloc<<"\n";
+            std::cout<<"Total C1 Gate Set Time: "<<total_gate_c1_set<<"\n";
+            std::cout<<"Total C2 Gate Set Time: "<<total_gate_c2_set<<"\n";
+            std::cout<<"Total C1 Gate Execution Time: "<<total_c1_exec<<"\n";
+            std::cout<<"Total C2 Gate Execution Time: "<<total_c2_exec<<"\n";
+            std::cout<<"Total SVD Time: "<<total_svd_time<<"\n";
+            std::cout<<"Total C2 Tensor Set: "<<total_c2_tensor_set<<"\n";
+            std::cout<<"Total C2 Non-Local Time: "<<total_c2_nl_time<<"\n";
 
-                std::cout<<"Avg Merge Execution Time: "<<(total_c2_gate_l > 0 ? (total_c2_merge / total_c2_gate_l) : 0.0)<<"\n";
-                std::cout<<"Avg Allocation/Deallocation Time: "<<((total_c1_gate + total_c2_gate_l + total_c2_gate_nl) > 0 ? (total_allocdealloc / (total_c1_gate + total_c2_gate_l + total_c2_gate_nl)) : 0.0)<<"\n";
-                std::cout<<"Avg C1 Gate Set Time: "<<(total_c1_gate > 0 ? (total_gate_c1_set / total_c1_gate) : 0.0)<<"\n";
-                std::cout<<"Avg C2 Gate Set Time: "<<(total_c2_gate_l > 0 ? (total_gate_c2_set / total_c2_gate_l) : 0.0)<<"\n";
-                std::cout<<"Avg C1 Gate Execution Time: "<<(total_c1_gate > 0 ? (total_c1_exec / total_c1_gate) : 0.0)<<"\n";
-                std::cout<<"Avg C2 Gate Execution Time: "<<(total_c2_gate_l > 0 ? (total_c2_exec / total_c2_gate_l) : 0.0)<<"\n";
-                std::cout<<"Avg SVD Time: "<<(total_c2_gate_l > 0 ? (total_svd_time / total_c2_gate_l) : 0.0)<<"\n";
-                std::cout<<"Avg C2 Tensor Set: "<<(total_c2_gate_l > 0 ? (total_c2_tensor_set / total_c2_gate_l) : 0.0)<<"\n";
-                std::cout<<"Avg C2 Non-Local Time: "<<(total_c2_gate_nl > 0 ? (total_c2_nl_time / total_c2_gate_nl) : 0.0)<<"\n";
+            std::cout<<"Avg Merge Execution Time: "<<(total_c2_gate_l > 0 ? (total_c2_merge / total_c2_gate_l) : 0.0)<<"\n";
+            std::cout<<"Avg Allocation/Deallocation Time: "<<((total_c1_gate + total_c2_gate_l + total_c2_gate_nl) > 0 ? (total_allocdealloc / (total_c1_gate + total_c2_gate_l + total_c2_gate_nl)) : 0.0)<<"\n";
+            std::cout<<"Avg C1 Gate Set Time: "<<(total_c1_gate > 0 ? (total_gate_c1_set / total_c1_gate) : 0.0)<<"\n";
+            std::cout<<"Avg C2 Gate Set Time: "<<(total_c2_gate_l > 0 ? (total_gate_c2_set / total_c2_gate_l) : 0.0)<<"\n";
+            std::cout<<"Avg C1 Gate Execution Time: "<<(total_c1_gate > 0 ? (total_c1_exec / total_c1_gate) : 0.0)<<"\n";
+            std::cout<<"Avg C2 Gate Execution Time: "<<(total_c2_gate_l > 0 ? (total_c2_exec / total_c2_gate_l) : 0.0)<<"\n";
+            std::cout<<"Avg SVD Time: "<<(total_c2_gate_l > 0 ? (total_svd_time / total_c2_gate_l) : 0.0)<<"\n";
+            std::cout<<"Avg C2 Tensor Set: "<<(total_c2_gate_l > 0 ? (total_c2_tensor_set / total_c2_gate_l) : 0.0)<<"\n";
+            std::cout<<"Avg C2 Non-Local Time: "<<(total_c2_gate_nl > 0 ? (total_c2_nl_time / total_c2_gate_nl) : 0.0)<<"\n";
 
-                std::cout<<"Percentage c2_merge of total time: "
-                         << (total_c2_merge / elap_t) * 100.0 << "%\n";
-                std::cout<<"Percentage alloc/dealloc of total time: "
-                         << (total_allocdealloc / elap_t) * 100.0 << "%\n";
-                std::cout<<"Percentage c1_gate_set of total time: "
-                         << (total_gate_c1_set / elap_t) * 100.0 << "%\n";
-                std::cout<<"Percentage c2_gate_set of total time: "
-                         << (total_gate_c2_set / elap_t) * 100.0 << "%\n";
-                std::cout<<"Percentage c1_exec of total time: "
-                         << (total_c1_exec / elap_t) * 100.0 << "%\n";
-                std::cout<<"Percentage c2_exec of total time: "
-                         << (total_c2_exec / elap_t) * 100.0 << "%\n";
-                std::cout<<"Percentage svd_time of total time: "
-                         << (total_svd_time / elap_t) * 100.0 << "%\n";
-                std::cout<<"Percentage c2_tensor_set of total time: "
-                         << (total_c2_tensor_set / elap_t) * 100.0 << "%\n";
-                std::cout<<"Percentage c1_tensor_set of total time: "
-                         << (total_c1_tensor_set / elap_t) * 100.0 << "%\n";
+            std::cout<<"Percentage c2_merge of total time: "
+                     << (total_c2_merge / elap_t) * 100.0 << "%\n";
+            std::cout<<"Percentage alloc/dealloc of total time: "
+                     << (total_allocdealloc / elap_t) * 100.0 << "%\n";
+            std::cout<<"Percentage c1_gate_set of total time: "
+                     << (total_gate_c1_set / elap_t) * 100.0 << "%\n";
+            std::cout<<"Percentage c2_gate_set of total time: "
+                     << (total_gate_c2_set / elap_t) * 100.0 << "%\n";
+            std::cout<<"Percentage c1_exec of total time: "
+                     << (total_c1_exec / elap_t) * 100.0 << "%\n";
+            std::cout<<"Percentage c2_exec of total time: "
+                     << (total_c2_exec / elap_t) * 100.0 << "%\n";
+            std::cout<<"Percentage svd_time of total time: "
+                     << (total_svd_time / elap_t) * 100.0 << "%\n";
+            std::cout<<"Percentage c2_tensor_set of total time: "
+                     << (total_c2_tensor_set / elap_t) * 100.0 << "%\n";
+            std::cout<<"Percentage c1_tensor_set of total time: "
+                     << (total_c1_tensor_set / elap_t) * 100.0 << "%\n";
 
-                std::cout<<"Percetanges added up: "
-                         << (total_c2_merge + total_allocdealloc + total_gate_c1_set +
-                             total_gate_c2_set + total_c1_exec + total_c2_exec +
-                             total_svd_time + total_c2_tensor_set + total_c1_tensor_set) / elap_t * 100.0
-                         << "%\n";
-            }
+            std::cout<<"Percetanges added up: "
+                     << (total_c2_merge + total_allocdealloc + total_gate_c1_set +
+                         total_gate_c2_set + total_c1_exec + total_c2_exec +
+                         total_svd_time + total_c2_tensor_set + total_c1_tensor_set) / elap_t * 100.0
+                     << "%\n";
         }
 
         IdxType *get_results() override

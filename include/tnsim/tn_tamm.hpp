@@ -1089,7 +1089,7 @@ namespace NWQSim
                 auto start_time = std::chrono::high_resolution_clock::now();
                 C2_GATE_NL_SWAP(U4, q0, q1);
                 auto end_time = std::chrono::high_resolution_clock::now();
-                total_c2_gate_nl_time += std::chrono::duration_cast<std::chrono::duration<double>>(end_time - start_time).count();
+                total_c2_nl_time += std::chrono::duration_cast<std::chrono::duration<double>>(end_time - start_time).count();
             }
         }
 
