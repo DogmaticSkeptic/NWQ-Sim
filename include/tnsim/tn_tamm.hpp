@@ -225,6 +225,7 @@ namespace NWQSim
                 std::cout<<"Total SVD Time: "<<total_svd_time<<"\n";
                 std::cout<<"Total C2 Tensor Set: "<<total_c2_tensor_set<<"\n";
                 std::cout<<"Total C2 Non-Local Time: "<<total_c2_nl_time<<"\n";
+                std::cout<<"Total MA Time: "<<total_ma_time<<"\n";
 
                 std::cout<<"Avg Merge Execution Time: "<<(total_c2_merge / total_c2_gate_l)<<"\n";
                 std::cout<<"Avg Allocation/Deallocation Time: "<<(total_allocdealloc / (total_c1_gate + total_c2_gate_l + total_c2_gate_nl))<<"\n";
@@ -254,12 +255,14 @@ namespace NWQSim
                          << (total_c2_tensor_set / elap_t) * 100.0 << "%\n";
                 std::cout<<"Percentage c1_tensor_set of total time: "
                          << (total_c1_tensor_set / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage MA of total time: "
+                         << (total_ma_time / elap_t) * 100.0 << "%\n";
 
                 std::cout<<"Percetanges added up: "
                          << (total_c2_merge + total_allocdealloc + total_gate_c1_set +
                              total_gate_c2_set + total_c1_exec + total_c2_exec +
-                             total_svd_time + total_c2_tensor_set + total_c1_tensor_set) / elap_t * 100.0
-                         << "%\n";
+                             total_svd_time + total_c2_tensor_set + total_c1_tensor_set +
+                             total_ma_time) / elap_t * 100.0 << "%\n";
             }
         }
 
@@ -340,6 +343,8 @@ namespace NWQSim
 
         double total_c2_nl_time = 0;
 
+        double total_ma_time = 0;
+
         int total_c1_gate = 0;
         int total_c2_gate_l = 0;
         int total_c2_gate_nl = 0;
@@ -385,7 +390,10 @@ namespace NWQSim
                 // measurement and assignment gate
                 else if (g.op_name == OP::MA)
                 {
+                    auto ma_start = std::chrono::high_resolution_clock::now();
                     MA_GATE(g.qubit);
+                    auto ma_end = std::chrono::high_resolution_clock::now();
+                    total_ma_time += std::chrono::duration_cast<std::chrono::duration<double>>(ma_end - ma_start).count();
                 }
                 // error on unrecognized gate
                 else
