@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <vector>
+#include <chrono> // Added for std::chrono
 
 #include "tensor.h"
 
@@ -86,48 +87,74 @@ namespace NWQSim
             std::vector<SVGate> gates = fuse_circuit_sv(circuit);
             IdxType n_gates = gates.size();
             assert(circuit->num_qubits() == n_qubits);
-            double sim_time;
-            cpu_timer sim_timer;
-            sim_timer.start_timer();
+            
+            auto sim_start = std::chrono::high_resolution_clock::now();
 	    
             // Set Gauge of MPS to right-canonical
             network.position(1);
          
             simulation_kernel(gates);
 
-            sim_timer.stop_timer();
-            sim_time = sim_timer.measure();
-            // std::cout<<"sim_time: "<<sim_time<<std::endl;
+            auto sim_end = std::chrono::high_resolution_clock::now();
+            double elap_t = std::chrono::duration_cast<std::chrono::duration<double>>(sim_end - sim_start).count();
 
-            std::cout<<"Total Simulation Time:"<<elap_t<<"\n";
-            std::cout<<"Total Time - Tallied Time:"<<elap_t - 
-                (total_c2_merge + total_allocdealloc + total_gate_c1_set +
-                 total_gate_c2_set + total_c1_exec + total_c2_exec +
-                 total_svd_time + total_new_svd_set)<<"\n";
-            std::cout<<"Run Time Statistics:";
-            std::cout<<"Total C1 Gates: "<<total_c1_gate<<"\n";
-            std::cout<<"Total C2 Gates (local): "<<total_c2_gate_l<<"\n";
-            std::cout<<"Total C2 Gates (non-local): "<<total_c2_gate_nl<<"\n";
+            if (Config::PRINT_SIM_TRACE)
+            {
+                std::cout<<"Total Simulation Time:"<<elap_t<<"\n";
+                std::cout<<"Total Time - Tallied Time:"<<elap_t - 
+                    (total_c2_merge + total_allocdealloc + total_gate_c1_set +
+                     total_gate_c2_set + total_c1_exec + total_c2_exec +
+                     total_svd_time + total_c2_tensor_set + total_c1_tensor_set)<<"\n";
+                std::cout<<"Run Time Statistics:";
+                std::cout<<"Total C1 Gates: "<<total_c1_gate<<"\n";
+                std::cout<<"Total C2 Gates (local): "<<total_c2_gate_l<<"\n";
+                std::cout<<"Total C2 Gates (non-local): "<<total_c2_gate_nl<<"\n";
 
-            std::cout<<"Total Merge Execution Time: "<<total_c2_merge<<"\n";
-            std::cout<<"Total Allocation/Deallocation Time: "<<total_allocdealloc<<"\n";
-            std::cout<<"Total C1 Gate Set Time: "<<total_gate_c1_set<<"\n";
-            std::cout<<"Total C2 Gate Set Time: "<<total_gate_c2_set<<"\n";
-            std::cout<<"Total C1 Gate Execution Time: "<<total_c1_exec<<"\n";
-            std::cout<<"Total C2 Gate Execution Time: "<<total_c2_exec<<"\n";
-            std::cout<<"Total SVD Time: "<<total_svd_time<<"\n";
-            std::cout<<"Total C2 Tensor Set: "<<total_c2_tensor_set<<"\n";
-            std::cout<<"Total C2 Non-Local Time: "<<total_c2_nl_time<<"\n";
+                std::cout<<"Total Merge Execution Time: "<<total_c2_merge<<"\n";
+                std::cout<<"Total Allocation/Deallocation Time: "<<total_allocdealloc<<"\n";
+                std::cout<<"Total C1 Gate Set Time: "<<total_gate_c1_set<<"\n";
+                std::cout<<"Total C2 Gate Set Time: "<<total_gate_c2_set<<"\n";
+                std::cout<<"Total C1 Gate Execution Time: "<<total_c1_exec<<"\n";
+                std::cout<<"Total C2 Gate Execution Time: "<<total_c2_exec<<"\n";
+                std::cout<<"Total SVD Time: "<<total_svd_time<<"\n";
+                std::cout<<"Total C2 Tensor Set: "<<total_c2_tensor_set<<"\n";
+                std::cout<<"Total C2 Non-Local Time: "<<total_c2_nl_time<<"\n";
 
-            std::cout<<"Avg Merge Execution Time: "<<(total_c2_merge / total_c2_gate_l)<<"\n";
-            std::cout<<"Avg Allocation/Deallocation Time: "<<(total_allocdealloc / (total_c1_gate + total_c2_gate_l + total_c2_gate_nl))<<"\n";
-            std::cout<<"Avg C1 Gate Set Time: "<<(total_gate_c1_set / total_c1_gate)<<"\n";
-            std::cout<<"Avg C2 Gate Set Time: "<<(total_gate_c2_set / total_c2_gate_l)<<"\n";
-            std::cout<<"Avg C1 Gate Execution Time: "<<(total_c1_exec / total_c1_gate)<<"\n";
-            std::cout<<"Avg C2 Gate Execution Time: "<<(total_c2_exec / total_c2_gate_l)<<"\n";
-            std::cout<<"Avg SVD Time: "<<(total_svd_time / total_c2_gate_l)<<"\n";
-            std::cout<<"Avg C2 Tensor Set: "<<(total_c2_tensor_set / total_c2_gate_l)<<"\n";
-            std::cout<<"Avg C2 Non-Local Time: "<<(total_c2_nl_time / total_c2_gate_nl)<<"\n";
+                std::cout<<"Avg Merge Execution Time: "<<(total_c2_gate_l > 0 ? (total_c2_merge / total_c2_gate_l) : 0.0)<<"\n";
+                std::cout<<"Avg Allocation/Deallocation Time: "<<((total_c1_gate + total_c2_gate_l + total_c2_gate_nl) > 0 ? (total_allocdealloc / (total_c1_gate + total_c2_gate_l + total_c2_gate_nl)) : 0.0)<<"\n";
+                std::cout<<"Avg C1 Gate Set Time: "<<(total_c1_gate > 0 ? (total_gate_c1_set / total_c1_gate) : 0.0)<<"\n";
+                std::cout<<"Avg C2 Gate Set Time: "<<(total_c2_gate_l > 0 ? (total_gate_c2_set / total_c2_gate_l) : 0.0)<<"\n";
+                std::cout<<"Avg C1 Gate Execution Time: "<<(total_c1_gate > 0 ? (total_c1_exec / total_c1_gate) : 0.0)<<"\n";
+                std::cout<<"Avg C2 Gate Execution Time: "<<(total_c2_gate_l > 0 ? (total_c2_exec / total_c2_gate_l) : 0.0)<<"\n";
+                std::cout<<"Avg SVD Time: "<<(total_c2_gate_l > 0 ? (total_svd_time / total_c2_gate_l) : 0.0)<<"\n";
+                std::cout<<"Avg C2 Tensor Set: "<<(total_c2_gate_l > 0 ? (total_c2_tensor_set / total_c2_gate_l) : 0.0)<<"\n";
+                std::cout<<"Avg C2 Non-Local Time: "<<(total_c2_gate_nl > 0 ? (total_c2_nl_time / total_c2_gate_nl) : 0.0)<<"\n";
+
+                std::cout<<"Percentage c2_merge of total time: "
+                         << (total_c2_merge / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage alloc/dealloc of total time: "
+                         << (total_allocdealloc / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage c1_gate_set of total time: "
+                         << (total_gate_c1_set / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage c2_gate_set of total time: "
+                         << (total_gate_c2_set / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage c1_exec of total time: "
+                         << (total_c1_exec / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage c2_exec of total time: "
+                         << (total_c2_exec / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage svd_time of total time: "
+                         << (total_svd_time / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage c2_tensor_set of total time: "
+                         << (total_c2_tensor_set / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage c1_tensor_set of total time: "
+                         << (total_c1_tensor_set / elap_t) * 100.0 << "%\n";
+
+                std::cout<<"Percetanges added up: "
+                         << (total_c2_merge + total_allocdealloc + total_gate_c1_set +
+                             total_gate_c2_set + total_c1_exec + total_c2_exec +
+                             total_svd_time + total_c2_tensor_set + total_c1_tensor_set) / elap_t * 100.0
+                         << "%\n";
+            }
         }
 
         IdxType *get_results() override
@@ -257,15 +284,15 @@ namespace NWQSim
         // Arbitrary 1-qubit gate
         virtual void C1_GATE(const ValType *gm_real, const ValType *gm_imag, const IdxType qubit)
         {
-            cpu_timer timer;
-            timer.start_timer();
-
             // iTensor is 1 indexed
             int site = qubit + 1;
 
             //Initialize empty C1 Gate tensor
+            auto alloc_start = std::chrono::high_resolution_clock::now();
             auto j = sites(site);
             auto gate = itensor::ITensor(prime(j),j);
+            auto alloc_end = std::chrono::high_resolution_clock::now();
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_end - alloc_start).count();
 
             // Set values of C1 gate tensor
             auto c1_gate_set = std::chrono::high_resolution_clock::now();
@@ -274,7 +301,7 @@ namespace NWQSim
             gate.set(2,1,std::complex<double>(gm_real[2],gm_imag[2]));
             gate.set(2,2,std::complex<double>(gm_real[3],gm_imag[3]));
             auto c1_gate_set_end = std::chrono::high_resolution_clock::now();
-            total_gate_c1_set += std::chrono::duration<double>(c1_gate_set_end - c1_gate_set).count();
+            total_gate_c1_set += std::chrono::duration_cast<std::chrono::duration<double>>(c1_gate_set_end - c1_gate_set).count();
 
             // Move center of orthongality to qubit that will be contracted with gate
             if(isOrtho(network)){
@@ -287,22 +314,22 @@ namespace NWQSim
             }
          
             //Contract the 1-qubit gate with the MPS site at the qubit
-            auto c1_exec = std::chrono::high_resolution_clock::now();
+            auto c1_exec_start = std::chrono::high_resolution_clock::now();
             auto temp = gate * network(site);
             auto c1_exec_end = std::chrono::high_resolution_clock::now();
-            total_c1_exec += std::chrono::duration<double>(c1_exec_end - c1_exec).count();
+            total_c1_exec += std::chrono::duration_cast<std::chrono::duration<double>>(c1_exec_end - c1_exec_start).count();
           
             temp.noPrime();
   
             
             // Set the MPS site to new values
+            auto c1_tensor_set_start = std::chrono::high_resolution_clock::now();
             network.set(site,temp);
+            auto c1_tensor_set_end = std::chrono::high_resolution_clock::now();
+            total_c1_tensor_set += std::chrono::duration_cast<std::chrono::duration<double>>(c1_tensor_set_end - c1_tensor_set_start).count();
 
             // // For safety re-orthogonalize the network
             // network.orthogonalize();
-            
-            timer.stop_timer();
-            total_c1_exec += timer.measure();
         }
 
         //============== C2 Gate ================
@@ -310,9 +337,6 @@ namespace NWQSim
         virtual void C2_GATE(const ValType *gm_real, const ValType *gm_imag,
                              const IdxType qubit0, const IdxType qubit1)
         {
-            cpu_timer gate_timer;
-            gate_timer.start_timer();
-
             assert(qubit0 != qubit1); // Non-cloning
 
             // iTensor is 1 indexed
@@ -332,9 +356,13 @@ namespace NWQSim
             //      |     |
             //     (i)   (j)
 
+            auto gate_alloc_start = std::chrono::high_resolution_clock::now();
             auto gate = itensor::ITensor(dag(i),dag(j),prime(i),prime(j));
+            auto gate_alloc_end = std::chrono::high_resolution_clock::now();
+            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(gate_alloc_end - gate_alloc_start).count();
 
             // Set values of C2 gate tensor
+            auto gate_set_start = std::chrono::high_resolution_clock::now();
             gate.set(1,1,1,1,std::complex<double>(gm_real[0],gm_imag[0]));
             gate.set(1,2,1,1,std::complex<double>(gm_real[1],gm_imag[1]));
             gate.set(2,1,1,1,std::complex<double>(gm_real[2],gm_imag[2]));
@@ -354,24 +382,27 @@ namespace NWQSim
             gate.set(1,2,2,2,std::complex<double>(gm_real[13],gm_imag[13]));
             gate.set(2,1,2,2,std::complex<double>(gm_real[14],gm_imag[14]));
             gate.set(2,2,2,2,std::complex<double>(gm_real[15],gm_imag[15]));
+            auto gate_set_end = std::chrono::high_resolution_clock::now();
+            total_gate_c2_set += std::chrono::duration_cast<std::chrono::duration<double>>(gate_set_end - gate_set_start).count();
 
             //
             // Non-adjacent / Non-local 2-qubit gates
             //
             // qubit0 must be < then qubit1  (control must be to the left (smaller site number) of target)
             //
-	    // method = true is Bond Propagation (fastest)
-	    // method = false is MPO
+	        // method = true is Bond Propagation (fastest)
+	        // method = false is MPO
             auto method = true;
             if(std::abs(qubit0 - qubit1) != 1){
                 total_c2_gate_nl++; // Increment non-local counter
                 //std::cout<<"Non local C2"<<std::endl;
+                auto nl_start_time = std::chrono::high_resolution_clock::now();
+
                 // 2Q Gate Decomposition into Control: u  ;  Target: s*v
-                cpu_timer svd_timer;
-                svd_timer.start_timer();
+                auto svd_start = std::chrono::high_resolution_clock::now();
                 auto [u,s,v] = itensor::svd(gate,{i,prime(i)},{j,prime(j)},{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});
-                svd_timer.stop_timer();
-                total_svd_time += svd_timer.measure();
+                auto svd_end = std::chrono::high_resolution_clock::now();
+                total_svd_time += std::chrono::duration_cast<std::chrono::duration<double>>(svd_end - svd_start).count();
                 auto sv = s*v;
 
                 if(method){
@@ -391,18 +422,25 @@ namespace NWQSim
 
       
                     // Initial contraction of control "gate" and control qubit
+                    auto c2_exec_start = std::chrono::high_resolution_clock::now();
                     auto site0_contract = u*network(site0);
+                    auto c2_exec_end = std::chrono::high_resolution_clock::now();
+                    total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(c2_exec_end - c2_exec_start).count();
 
                     // Decompose contraction, U is the new site tensor in the circuit network
                     // S*V holds the "propagating bond" which is "pushed" through the circuit to the target site
                     // This "bond" is the dangling link of the initial gate SVD
-                    svd_timer.start_timer();
+                    svd_start = std::chrono::high_resolution_clock::now();
                     auto [U,S,V] = itensor::svd(site0_contract,{i,prime(i),leftLinkIndex(network,site0)},{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});
-                    svd_timer.stop_timer();
-                    total_svd_time += svd_timer.measure();
+                    svd_end = std::chrono::high_resolution_clock::now();
+                    total_svd_time += std::chrono::duration_cast<std::chrono::duration<double>>(svd_end - svd_start).count();
+
+                    auto c2_tensor_set_start = std::chrono::high_resolution_clock::now();
                     network.set(site0,U);
                     network.position(site0);
                     propagating_bond =S*V;
+                    auto c2_tensor_set_end = std::chrono::high_resolution_clock::now();
+                    total_c2_tensor_set += std::chrono::duration_cast<std::chrono::duration<double>>(c2_tensor_set_end - c2_tensor_set_start).count();
                 
                     // Track link index to insure correct indices are contracted at each step
                     lindex = commonInds(U,S)[0];
@@ -411,23 +449,37 @@ namespace NWQSim
                     // Repeat propagation process through the intermediate sites
                     for(auto k = site0+1 ; k < site1; k++ ){
 
+                        c2_exec_start = std::chrono::high_resolution_clock::now();
                         auto k_contract = propagating_bond * network(k);
-                        svd_timer.start_timer();
+                        c2_exec_end = std::chrono::high_resolution_clock::now();
+                        total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(c2_exec_end - c2_exec_start).count();
+
+                        svd_start = std::chrono::high_resolution_clock::now();
                         auto [u_prop,s_prop,v_prop] = itensor::svd(k_contract,{sites(k),lindex},{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});
-                        svd_timer.stop_timer();
-                        total_svd_time += svd_timer.measure();
+                        svd_end = std::chrono::high_resolution_clock::now();
+                        total_svd_time += std::chrono::duration_cast<std::chrono::duration<double>>(svd_end - svd_start).count();
+
+                        c2_tensor_set_start = std::chrono::high_resolution_clock::now();
                         lindex = commonInds(u_prop,s_prop)[0];
                         network.set(k,u_prop);
                         // network.position(k);
                         propagating_bond = s_prop*v_prop;
+                        c2_tensor_set_end = std::chrono::high_resolution_clock::now();
+                        total_c2_tensor_set += std::chrono::duration_cast<std::chrono::duration<double>>(c2_tensor_set_end - c2_tensor_set_start).count();
 
                     }
    
                     // Final contraction with Target qubit, propagating bond is absorbed in U,Link on sv
+                    c2_exec_start = std::chrono::high_resolution_clock::now();
                     auto site1_contract = sv*propagating_bond*network(site1);
+                    c2_exec_end = std::chrono::high_resolution_clock::now();
+                    total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(c2_exec_end - c2_exec_start).count();
     
                     // Target site is set to new values
+                    c2_tensor_set_start = std::chrono::high_resolution_clock::now();
                     network.set(site1,site1_contract);
+                    auto c2_tensor_set_end = std::chrono::high_resolution_clock::now();
+                    total_c2_tensor_set += std::chrono::duration_cast<std::chrono::duration<double>>(c2_tensor_set_end - c2_tensor_set_start).count();
 
                     // network clean-up is performed after else statement
             
@@ -497,15 +549,18 @@ namespace NWQSim
                         }
                     }
 
+                    c2_exec_start = std::chrono::high_resolution_clock::now();
                     network = applyMPO(gate_MPO,network);
                     network.normalize();
-
+                    c2_exec_end = std::chrono::high_resolution_clock::now();
+                    total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(c2_exec_end - c2_exec_start).count();
                 }
 
                 // network clean-up
+                auto nl_end_time = std::chrono::high_resolution_clock::now();
                 network.noPrime();
                 // network.orthogonalize();
-
+                total_c2_nl_time += std::chrono::duration_cast<std::chrono::duration<double>>(nl_end_time - nl_start_time).count();
             }
             else{
                 total_c2_gate_l++; // Increment local counter
@@ -531,7 +586,10 @@ namespace NWQSim
                 //     O -- O
                 //
                 //
+                auto merge_start = std::chrono::high_resolution_clock::now();
                 auto contract_location = network(site0)*network(site1);
+                auto merge_end = std::chrono::high_resolution_clock::now();
+                total_c2_merge += std::chrono::duration_cast<std::chrono::duration<double>>(merge_end - merge_start).count();
 
                 //     |    |
                 //    --------
@@ -541,7 +599,10 @@ namespace NWQSim
                 //    --------
                 //   | sites  |
                 //    --------
+                auto c2_exec_start = std::chrono::high_resolution_clock::now();
                 auto new_sites_contracted = gate*contract_location;
+                auto c2_exec_end = std::chrono::high_resolution_clock::now();
+                total_c2_exec += std::chrono::duration_cast<std::chrono::duration<double>>(c2_exec_end - c2_exec_start).count();
                 //
                 //      |       |
                 //    -------------
@@ -549,21 +610,23 @@ namespace NWQSim
                 //    -------------
   
                 new_sites_contracted.noPrime();
-                cpu_timer svd_timer;
-                svd_timer.start_timer();
+                
+                auto svd_start = std::chrono::high_resolution_clock::now();
                 auto [u,s,v] = itensor::svd(new_sites_contracted ,itensor::inds(network(site0)),{"Cutoff=", Cutoff, "MaxDim=", MaxDim, "SVDMethod=", "gesdd"});    
-                svd_timer.stop_timer();
-                total_svd_time += svd_timer.measure();
+                auto svd_end = std::chrono::high_resolution_clock::now();
+                total_svd_time += std::chrono::duration_cast<std::chrono::duration<double>>(svd_end - svd_start).count();
+
+                auto c2_tensor_set_start = std::chrono::high_resolution_clock::now();
                 network.set(site0, u);
                 network.set(site1, s*v);
+                auto c2_tensor_set_end = std::chrono::high_resolution_clock::now();
+                total_c2_tensor_set += std::chrono::duration_cast<std::chrono::duration<double>>(c2_tensor_set_end - c2_tensor_set_start).count();
 
                 //    |      |
                 //   (u) - (s*v)
                 //
                 // network.orthogonalize();
             }
-            gate_timer.stop_timer();
-            total_c2_exec += gate_timer.measure();
         }
 
         //============== C4 Gate ================
@@ -583,9 +646,8 @@ namespace NWQSim
         //============== MA Gate (Measure all qubits in Pauli-Z) ================
         virtual void MA_GATE(const IdxType repetition)
         {
-            cpu_timer timer;
-            timer.start_timer();
-
+            auto ma_start = std::chrono::high_resolution_clock::now();
+            
             SAFE_FREE_HOST(results);
             SAFE_ALOC_HOST(results, sizeof(IdxType) * repetition);
             memset(results, 0, sizeof(IdxType) * repetition);
@@ -728,8 +790,8 @@ namespace NWQSim
 		        }
 
             }
-            timer.stop_timer();
-            total_ma_exec += timer.measure();
+            auto ma_end = std::chrono::high_resolution_clock::now();
+            total_ma_exec += std::chrono::duration_cast<std::chrono::duration<double>>(ma_end - ma_start).count();
         }
         virtual double EXPECT_C4_GATE(const ValType *gm_real, const ValType *gm_imag, IdxType qubit0, IdxType qubit1, IdxType qubit2, IdxType qubit3, IdxType mask)
         {
@@ -754,12 +816,8 @@ namespace NWQSim
         //============== Reset ================
         virtual void RESET_GATE(const IdxType qubit)
         {
-            cpu_timer timer;
-            timer.start_timer();
             // Current implementation throws error. If implemented, add actual reset logic here.
             throw std::runtime_error("Not implemented");
-            // timer.stop_timer(); // This line will not be reached due to throw
-            // total_reset_exec += timer.measure();
         }
 
         //============== Purity Check  ================
