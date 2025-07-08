@@ -263,7 +263,7 @@ namespace NWQSim
                          << (total_ma_time / elap_t) * 100.0 << "%\n";
 
                 std::cout<<"Percetanges added up: "
-                         << (total_c2_merge + total_alloc total_dealloc + total_gate_c1_set +
+                         << (total_c2_merge + total_alloc + total_dealloc + total_gate_c1_set +
                              total_gate_c2_set + total_c1_exec + total_c2_exec +
                              total_svd_time + total_c2_tensor_set + total_c1_tensor_set +
                              total_ma_time) / elap_t * 100.0 << "%\n";
