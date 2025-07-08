@@ -208,7 +208,7 @@ namespace NWQSim
             {
                 std::cout<<"Total Simulation Time:"<<elap_t<<"\n";
                 std::cout<<"Total Time - Tallied Time:"<<elap_t - 
-                    (total_c2_merge + total_allocdealloc + total_gate_c1_set +
+                    (total_c2_merge + total_alloc + total_dealloc total_gate_c1_set +
                      total_gate_c2_set + total_c1_exec + total_c2_exec +
                      total_svd_time + total_c2_tensor_set + total_c1_tensor_set)<<"\n";
                 std::cout<<"Run Time Statistics:";
@@ -217,7 +217,8 @@ namespace NWQSim
                 std::cout<<"Total C2 Gates (non-local): "<<total_c2_gate_nl<<"\n";
 
                 std::cout<<"Total Merge Execution Time: "<<total_c2_merge<<"\n";
-                std::cout<<"Total Allocation/Deallocation Time: "<<total_allocdealloc<<"\n";
+                std::cout<<"Total Allocation Time: "<<total_alloc<<"\n";
+                std::cout<<"Total Deallocation Time: "<<total_dealloc<<"\n";
                 std::cout<<"Total C1 Gate Set Time: "<<total_gate_c1_set<<"\n";
                 std::cout<<"Total C2 Gate Set Time: "<<total_gate_c2_set<<"\n";
                 std::cout<<"Total C1 Gate Execution Time: "<<total_c1_exec<<"\n";
@@ -228,7 +229,8 @@ namespace NWQSim
                 std::cout<<"Total MA Time: "<<total_ma_time<<"\n";
 
                 std::cout<<"Avg Merge Execution Time: "<<(total_c2_merge / total_c2_gate_l)<<"\n";
-                std::cout<<"Avg Allocation/Deallocation Time: "<<(total_allocdealloc / (total_c1_gate + total_c2_gate_l + total_c2_gate_nl))<<"\n";
+                std::cout<<"Avg Allocation Time: "<<(total_alloc / (total_c1_gate + total_c2_gate_l + total_c2_gate_nl))<<"\n";
+                std::cout<<"Avg Deallocation Time: "<<(total_dealloc / (total_c1_gate + total_c2_gate_l + total_c2_gate_nl))<<"\n";
                 std::cout<<"Avg C1 Gate Set Time: "<<(total_gate_c1_set / total_c1_gate)<<"\n";
                 std::cout<<"Avg C2 Gate Set Time: "<<(total_gate_c2_set / total_c2_gate_l)<<"\n";
                 std::cout<<"Avg C1 Gate Execution Time: "<<(total_c1_exec / total_c1_gate)<<"\n";
@@ -239,8 +241,10 @@ namespace NWQSim
 
                 std::cout<<"Percentage c2_merge of total time: "
                          << (total_c2_merge / elap_t) * 100.0 << "%\n";
-                std::cout<<"Percentage alloc/dealloc of total time: "
-                         << (total_allocdealloc / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage alloc of total time: "
+                         << (total_alloc / elap_t) * 100.0 << "%\n";
+                std::cout<<"Percentage dealloc of total time: "
+                         << (total_dealloc / elap_t) * 100.0 << "%\n";
                 std::cout<<"Percentage c1_gate_set of total time: "
                          << (total_gate_c1_set / elap_t) * 100.0 << "%\n";
                 std::cout<<"Percentage c2_gate_set of total time: "
@@ -330,7 +334,8 @@ namespace NWQSim
         std::vector<tamm::Tensor<Cplx>> mps_tensors;
 
         // execution time statistics
-        double total_allocdealloc = 0;
+        double total_alloc = 0;
+        double total_dealloc = 0;
         double total_gate_c1_set = 0;
         double total_c1_exec = 0;
         double total_c1_tensor_set = 0;
@@ -413,7 +418,7 @@ namespace NWQSim
             G.allocate(&ec);
             auto G_alloc_end = std::chrono::high_resolution_clock::now();
 
-            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(G_alloc_end - G_alloc_time).count();
+            total_alloc += std::chrono::duration_cast<std::chrono::duration<double>>(G_alloc_end - G_alloc_time).count();
         
             auto G_set_time = std::chrono::high_resolution_clock::now();
             for (const auto &blockid : G.loop_nest())
@@ -450,7 +455,7 @@ namespace NWQSim
             Tnew.set_dense();
             Tnew.allocate(&ec);
             auto alloc_end = std::chrono::high_resolution_clock::now();
-            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_end - alloc_time).count();
+            total_alloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_end - alloc_time).count();
         
             auto exec_time = std::chrono::high_resolution_clock::now();
             sch(Tnew("l","p'","r") = G("p'","p") * T("l","p","r"),
@@ -464,7 +469,7 @@ namespace NWQSim
             T.deallocate();
             G.deallocate();
             auto dealloc_end = std::chrono::high_resolution_clock::now();
-            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
+            total_dealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
             auto Tnew_set_time = std::chrono::high_resolution_clock::now();
             mps_tensors[site] = std::move(Tnew);
             auto Tnew_set_end = std::chrono::high_resolution_clock::now();
@@ -587,7 +592,7 @@ namespace NWQSim
             M.set_dense();
             M.allocate(&ec);
             auto alloc_end = std::chrono::high_resolution_clock::now();
-            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_end - alloc_time).count();
+            total_alloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_end - alloc_time).count();
         
             auto merge_time = std::chrono::high_resolution_clock::now();
             sch(M("l","p0","p1","r") =
@@ -604,7 +609,7 @@ namespace NWQSim
             G4.set_dense();
             G4.allocate(&ec);
             auto alloc_gate_end = std::chrono::high_resolution_clock::now();
-            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_gate_end - alloc_gate_time).count();
+            total_alloc += std::chrono::duration_cast<std::chrono::duration<double>>(alloc_gate_end - alloc_gate_time).count();
             auto set_gate_time = std::chrono::high_resolution_clock::now();
             for (const auto &blockid : G4.loop_nest())
             {
@@ -639,7 +644,7 @@ namespace NWQSim
             M2.set_dense();
             M2.allocate(&ec);
             auto apply_end = std::chrono::high_resolution_clock::now();
-            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(apply_end - apply_time).count();
+            total_alloc += std::chrono::duration_cast<std::chrono::duration<double>>(apply_end - apply_time).count();
 
             auto exec_time = std::chrono::high_resolution_clock::now();
             sch(M2("l","p0p","p1p","r") =
@@ -653,7 +658,7 @@ namespace NWQSim
             M.deallocate();
             G4.deallocate();
             auto dealloc_end = std::chrono::high_resolution_clock::now();
-            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
+            total_dealloc += std::chrono::duration_cast<std::chrono::duration<double>>(dealloc_end - dealloc_time).count();
         
             // form matrix for singular value decomposition
             auto svd_time = std::chrono::high_resolution_clock::now();
@@ -725,7 +730,7 @@ namespace NWQSim
             mps_tensors[q1].deallocate();
             M2.deallocate();
             auto replace_end = std::chrono::high_resolution_clock::now();
-            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(replace_end - replace_time).count();
+            total_dealloc += std::chrono::duration_cast<std::chrono::duration<double>>(replace_end - replace_time).count();
         
             // build new left tensor Ti_new
             auto Ti_new_time = std::chrono::high_resolution_clock::now();
@@ -735,7 +740,7 @@ namespace NWQSim
             Ti_new.set_dense();
             Ti_new.allocate(&ec);   
             auto Ti_new_end = std::chrono::high_resolution_clock::now();
-            total_allocdealloc += std::chrono::duration_cast<std::chrono::duration<double>>(Ti_new_end - Ti_new_time).count();
+            total_alloc += std::chrono::duration_cast<std::chrono::duration<double>>(Ti_new_end - Ti_new_time).count();
             auto c2_tensor_set_time = std::chrono::high_resolution_clock::now();
             for (const auto &blockid : Ti_new.loop_nest())
             {
