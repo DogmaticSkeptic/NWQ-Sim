@@ -14,14 +14,14 @@ int main(int argc, char* argv[]) {
     // Prepare 20 merge tasks
     std::vector<size_t> tasks;
     for(int i = 1; i <= 20; ++i) {
-        tasks.push_back(static_cast<size_t> 28);
+        tasks.push_back(static_cast<size_t>(std::stoi(argv[2])));
     }
     int ntasks = static_cast<int>(tasks.size());
 
     // -------------------------------
     // Parallel section with subgroups
     // -------------------------------
-    int subranks = 16;
+    int subranks = std::stoi(argv[1]);
     tamm::ProcGroup task_pg =
         tamm::ProcGroup::create_subgroups(world_pg, subranks);
     tamm::ExecutionContext ec_par{
