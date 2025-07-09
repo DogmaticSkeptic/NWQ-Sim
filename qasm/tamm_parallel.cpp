@@ -11,8 +11,8 @@ int main(int argc, char* argv[]) {
     int nranks = world_pg.size().value();
 
     std::vector<size_t> tasks;
-    for(int i = 1; i <= 20; ++i++) {
-        tasks.push_back(static_cast<size_t>(i) * 128);
+    for(int i = 1; i <= 20; i++) {
+        tasks.push_back(static_cast<size_t>(i) * 64);
     }
     int ntasks = static_cast<int>(tasks.size());
 
