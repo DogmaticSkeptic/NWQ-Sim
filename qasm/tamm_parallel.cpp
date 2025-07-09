@@ -14,7 +14,7 @@ int main(int argc, char* argv[]) {
     // Prepare 20 merge tasks
     std::vector<size_t> tasks;
     for(int i = 1; i <= 20; ++i) {
-        tasks.push_back(static_cast<size_t>(i) * 128);
+        tasks.push_back(static_cast<size_t>(i) * 28);
     }
     int ntasks = static_cast<int>(tasks.size());
 
