@@ -17,7 +17,7 @@ int main(int argc, char* argv[]) {
     }
     int ntasks = static_cast<int>(tasks.size());
 
-    int subranks = std::max(1, nranks / ntasks);
+    int subranks = std::max(1, 4);
     tamm::ProcGroup task_pg = tamm::ProcGroup::create_subgroups(world_pg, subranks);
     tamm::ExecutionContext ec_par{task_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga};
     tamm::Scheduler sch_par{ec_par};
