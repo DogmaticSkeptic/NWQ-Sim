@@ -9,6 +9,7 @@ int main(int argc, char* argv[]) {
     tamm::initialize(argc, argv);
     tamm::ProcGroup world_pg = tamm::ProcGroup::create_world_coll();
     int nranks = world_pg.size().value();
+    std::cout << "Number of ranks: " << nranks << "\n";
 
     std::vector<size_t> tasks;
     for(int i = 1; i <= 20; i++) {
