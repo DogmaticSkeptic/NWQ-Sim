@@ -37,6 +37,8 @@ int main(int argc, char* argv[]) {
     }
     task_pg.broadcast(&next, 0);
 
+
+    auto parallel_start = std::chrono::high_resolution_clock::now();
     while(next < ntasks) {
         int64_t task_id = next;
         size_t N = tasks[static_cast<size_t>(task_id)];
@@ -95,6 +97,15 @@ int main(int argc, char* argv[]) {
         task_pg.broadcast(&next, 0);
     }
 
+    auto parallel_end = std::chrono::high_resolution_clock::now();
+    if(world_pg.rank().value() == 0) {
+        double secs = std::chrono::duration<double>(
+            parallel_end - parallel_start).count();
+        std::cout << "PARALLEL EXECUTION TIME: "
+                  << std::fixed << std::setprecision(6) << secs
+                  << " seconds\n";
+    }
+
     ac.deallocate();
 
     // -------------------------
@@ -104,6 +115,7 @@ int main(int argc, char* argv[]) {
         world_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga};
     tamm::Scheduler sch_seq{ec_seq};
 
+    auto sequential_start = std::chrono::high_resolution_clock::now();
     for(int idx = 0; idx < ntasks; ++idx) {
         size_t N = tasks[static_cast<size_t>(idx)];
         int world_rank = world_pg.rank().value();
@@ -155,6 +167,15 @@ int main(int argc, char* argv[]) {
         }
 
         sch_seq.deallocate(A, B, C).execute();
+    }
+
+    auto sequential_end = std::chrono::high_resolution_clock::now();
+    if(world_pg.rank().value() == 0) {
+        double secs = std::chrono::duration<double>(
+            sequential_end - sequential_start).count();
+        std::cout << "SEQUENTIAL EXECUTION TIME: "
+                  << std::fixed << std::setprecision(6) << secs
+                  << " seconds\n";
     }
 
     tamm::finalize();
