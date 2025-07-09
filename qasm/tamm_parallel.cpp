@@ -11,8 +11,8 @@ int main(int argc, char* argv[]) {
     int nranks = world_pg.size().value();
 
     std::vector<size_t> tasks;
-    for(int i = 1; i <= 20; ++i) {
-        tasks.push_back(static_cast<size_t>(i) * 32);
+    for(int i = 1; i <= 20; ++i++) {
+        tasks.push_back(static_cast<size_t>(i) * 128);
     }
     int ntasks = static_cast<int>(tasks.size());
 
@@ -31,7 +31,8 @@ int main(int argc, char* argv[]) {
 
     auto t0_par = std::chrono::high_resolution_clock::now();
     while(next < ntasks) {
-        size_t N = tasks[static_cast<size_t>(next)];
+        int64_t task_id = next;
+        size_t N = tasks[static_cast<size_t>(task_id)];
         tamm::Tile bt = static_cast<tamm::Tile>(std::min(N, size_t(64)));
         tamm::TiledIndexSpace bond{tamm::IndexSpace{tamm::range(N)}, bt};
         tamm::TiledIndexSpace phys{tamm::IndexSpace{tamm::range(2)}, 1};
@@ -48,7 +49,15 @@ int main(int argc, char* argv[]) {
         sch_par.allocate(A, B, C).execute();
         sch_par(A() = Cplx{1.0, 0.0})(B() = Cplx{1.0, 0.0})(C() = Cplx{0.0, 0.0}).execute();
 
+        auto t0_task_par = std::chrono::high_resolution_clock::now();
         sch_par(C(l, p1, p2, r) = A(l, p1, b) * B(b, p2, r)).execute(ec_par.exhw(), false);
+        auto t1_task_par = std::chrono::high_resolution_clock::now();
+        double time_task_par =
+            std::chrono::duration_cast<std::chrono::duration<double>>(t1_task_par - t0_task_par).count();
+        if(task_pg.rank().value() == 0) {
+            std::cout << "Parallel task " << task_id << " N=" << N
+                      << " time=" << time_task_par << " s\n";
+        }
 
         sch_par.deallocate(A, B, C).execute();
 
@@ -58,7 +67,8 @@ int main(int argc, char* argv[]) {
         task_pg.broadcast(&next, 0);
     }
     auto t1_par = std::chrono::high_resolution_clock::now();
-    double time_par = std::chrono::duration_cast<std::chrono::duration<double>>(t1_par - t0_par).count();
+    double time_par =
+        std::chrono::duration_cast<std::chrono::duration<double>>(t1_par - t0_par).count();
     if(world_pg.rank().value() == 0) {
         std::cout << "Parallel total time = " << time_par << " s\n";
     }
@@ -86,12 +96,21 @@ int main(int argc, char* argv[]) {
         sch_seq.allocate(A, B, C).execute();
         sch_seq(A() = Cplx{1.0, 0.0})(B() = Cplx{1.0, 0.0})(C() = Cplx{0.0, 0.0}).execute();
 
+        auto t0_task_seq = std::chrono::high_resolution_clock::now();
         sch_seq(C(l, p1, p2, r) = A(l, p1, b) * B(b, p2, r)).execute(ec_seq.exhw(), false);
+        auto t1_task_seq = std::chrono::high_resolution_clock::now();
+        double time_task_seq =
+            std::chrono::duration_cast<std::chrono::duration<double>>(t1_task_seq - t0_task_seq).count();
+        if(world_pg.rank().value() == 0) {
+            std::cout << "Sequential task " << idx << " N=" << N
+                      << " time=" << time_task_seq << " s\n";
+        }
 
         sch_seq.deallocate(A, B, C).execute();
     }
     auto t1_seq = std::chrono::high_resolution_clock::now();
-    double time_seq = std::chrono::duration_cast<std::chrono::duration<double>>(t1_seq - t0_seq).count();
+    double time_seq =
+        std::chrono::duration_cast<std::chrono::duration<double>>(t1_seq - t0_seq).count();
     if(world_pg.rank().value() == 0) {
         std::cout << "Sequential total time = " << time_seq << " s\n";
     }
