@@ -21,7 +21,7 @@ int main(int argc, char* argv[]) {
     // -------------------------------
     // Parallel section with subgroups
     // -------------------------------
-    int subranks = 4;
+    int subranks = 8;
     tamm::ProcGroup task_pg =
         tamm::ProcGroup::create_subgroups(world_pg, subranks);
     tamm::ExecutionContext ec_par{
