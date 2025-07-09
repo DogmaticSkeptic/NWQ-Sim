@@ -64,32 +64,28 @@ int main(int argc, char* argv[]) {
 
         // Timestamp: start
         auto t_start = std::chrono::high_resolution_clock::now();
-        if(sub_rank == 0) {
-            double secs = std::chrono::duration<double>(
-                t_start.time_since_epoch()).count();
-            std::cout << "PAR TASK " << task_id
-                      << " START world=" << world_rank
-                      << " sub="        << sub_rank
-                      << " t="          << std::fixed
-                      << std::setprecision(6) << secs
-                      << "\n";
-        }
+        double secs = std::chrono::duration<double>(
+            t_start.time_since_epoch()).count();
+        std::cout << "PAR TASK " << task_id
+                  << " START world=" << world_rank
+                  << " sub="        << sub_rank
+                  << " t="          << std::fixed
+                  << std::setprecision(6) << secs
+                  << "\n";
 
         sch_par(C(l, p1, p2, r) = A(l, p1, b) * B(b, p2, r))
                .execute(ec_par.exhw(), false);
 
         // Timestamp: end
         auto t_end = std::chrono::high_resolution_clock::now();
-        if(sub_rank == 0) {
-            double secs = std::chrono::duration<double>(
-                t_end.time_since_epoch()).count();
-            std::cout << "PAR TASK " << task_id
-                      << " END   world=" << world_rank
-                      << " sub="        << sub_rank
-                      << " t="          << std::fixed
-                      << std::setprecision(6) << secs
-                      << "\n";
-        }
+        double secs = std::chrono::duration<double>(
+            t_end.time_since_epoch()).count();
+        std::cout << "PAR TASK " << task_id
+                  << " END   world=" << world_rank
+                  << " sub="        << sub_rank
+                  << " t="          << std::fixed
+                  << std::setprecision(6) << secs
+                  << "\n";
 
         sch_par.deallocate(A, B, C).execute();
 
