@@ -78,13 +78,13 @@ int main(int argc, char* argv[]) {
 
         // Timestamp: end
         auto t_end = std::chrono::high_resolution_clock::now();
-        double secs = std::chrono::duration<double>(
+        double secs2 = std::chrono::duration<double>(
             t_end.time_since_epoch()).count();
         std::cout << "PAR TASK " << task_id
                   << " END   world=" << world_rank
                   << " sub="        << sub_rank
                   << " t="          << std::fixed
-                  << std::setprecision(6) << secs
+                  << std::setprecision(6) << secs2
                   << "\n";
 
         sch_par.deallocate(A, B, C).execute();
