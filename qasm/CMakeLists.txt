@@ -3,6 +3,9 @@ set(SOURCE_FILE "nwq_qasm.cpp")
 add_executable(nwq_qasm nwq_qasm.cpp)
 target_compile_features(nwq_qasm PRIVATE cxx_std_17)
 
+add_executable(tamm_parallel tamm_parallel.cpp)
+target_compile_features(tamm_parallel PRIVATE cxx_std_17)
+
 # Link against OpenMP if available
 if(OpenMP_FOUND)
     target_link_libraries(nwq_qasm PUBLIC OpenMP::OpenMP_CXX)
@@ -62,4 +65,6 @@ endif()
 if (TAMM_FOUND)
     target_link_libraries(nwq_qasm PRIVATE tamm::tamm)
     target_compile_definitions(nwq_qasm PUBLIC TAMM_ENABLED)
+    target_link_libraries(tamm_parallel PRIVATE tamm::tamm)
+    target_compile_definitions(tamm_parallel PUBLIC TAMM_ENABLED)
 endif()
