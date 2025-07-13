@@ -29,7 +29,7 @@ int main(int argc, char* argv[]) {
     auto t2 = std::chrono::high_resolution_clock::now();
     for(int i = 0; i < ntasks; ++i) {
         size_t M = tasks[static_cast<size_t>(i)];
-        tamm::Tile bt = static_cast<tamm::Tile>(std::min(M, size_t(64)));
+        tamm::Tile bt = static_cast<tamm::Tile>(std::min(M, size_t(164)));
         tamm::TiledIndexSpace bond{tamm::IndexSpace{tamm::range(M)}, bt};
         tamm::TiledIndexSpace phys{tamm::IndexSpace{tamm::range(2)}, 1};
         auto [l,b,r] = bond.labels<3>("all");
@@ -87,7 +87,7 @@ int main(int argc, char* argv[]) {
         auto t0 = std::chrono::high_resolution_clock::now();
         while(next < ntasks) {
             size_t M = tasks[static_cast<size_t>(next)];
-            tamm::Tile bt = static_cast<tamm::Tile>(std::min(M, size_t(64)));
+            tamm::Tile bt = static_cast<tamm::Tile>(std::min(M, size_t(164)));
             tamm::TiledIndexSpace bond{tamm::IndexSpace{tamm::range(M)}, bt};
             tamm::TiledIndexSpace phys{tamm::IndexSpace{tamm::range(2)}, 1};
             auto [l,b,r] = bond.labels<3>("all");
