@@ -89,11 +89,12 @@ int main(int argc, char* argv[]) {
         for(int i = 0; i < ntasks; ++i) {
             size_t M  = tasks[static_cast<size_t>(i)];
             size_t bt = std::min(M, size_t(64));
-            itensor::Index l("l", M);
-            itensor::Index p1("p1", 2);
-            itensor::Index p2("p2", 2);
-            itensor::Index b("b", bt);
-            itensor::Index r("r", M);
+
+            itensor::Index l(M,"l");
+            itensor::Index p1(2,"p1");
+            itensor::Index p2(2,"p2");
+            itensor::Index b(bt,"b");
+            itensor::Index r(M,"r");
 
             itensor::ITensor A_it(l,p1,b);
             itensor::ITensor B_it(b,p2,r);
