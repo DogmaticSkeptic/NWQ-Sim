@@ -23,20 +23,19 @@ int main(int argc, char* argv[]) {
     std::vector<size_t> tasks(ntasks, N);
 
     tamm::ExecutionContext ec_seq{
-        world_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga
+        world_pg, tamm::DistributionKind::nw, tamm::MemoryManagerKind::ga
     };
     tamm::Scheduler sch_seq{ec_seq};
 
     double seq_exec_time = 0.0;
     for(int i = 0; i < ntasks; ++i) {
-        size_t M = tasks[static_cast<size_t>(i)];
+        size_t M = tasks[i];
         tamm::Tile bt = static_cast<tamm::Tile>(164);
         tamm::TiledIndexSpace bond{tamm::IndexSpace{tamm::range(M)}, bt};
         tamm::TiledIndexSpace phys{tamm::IndexSpace{tamm::range(2)}, 1};
         auto [l,b,r] = bond.labels<3>("all");
         auto [p1,p2] = phys.labels<2>("all");
         tamm::Tensor<Cplx> A({l,p1,b}), B({b,p2,r}), C({l,p1,p2,r});
-        A.set_dense(); B.set_dense(); C.set_dense();
         sch_seq.allocate(A,B,C).execute();
         sch_seq(A()=Cplx{1.0,0.0})(B()=Cplx{1.0,0.0})(C()=Cplx{0.0,0.0}).execute();
         auto t0 = Clock::now();
@@ -48,7 +47,7 @@ int main(int argc, char* argv[]) {
 
     double itensor_time = 0.0;
     for(int i = 0; i < ntasks; ++i) {
-        size_t M  = tasks[static_cast<size_t>(i)];
+        size_t M  = tasks[i];
         size_t bt = std::min(M, size_t(64));
         itensor::Index l(M,"l");
         itensor::Index p1(2,"p1");
@@ -71,7 +70,7 @@ int main(int argc, char* argv[]) {
         tamm::ProcGroup task_pg =
             tamm::ProcGroup::create_subgroups(world_pg, subranks);
         tamm::ExecutionContext ec_par{
-            task_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga
+            task_pg, tamm::DistributionKind::nw, tamm::MemoryManagerKind::ga
         };
         tamm::Scheduler sch_par{ec_par};
 
@@ -91,7 +90,6 @@ int main(int argc, char* argv[]) {
             auto [l,b,r] = bond.labels<3>("all");
             auto [p1,p2] = phys.labels<2>("all");
             tamm::Tensor<Cplx> A({l,p1,b}), B({b,p2,r}), C({l,p1,p2,r});
-            A.set_dense(); B.set_dense(); C.set_dense();
             sch_par.allocate(A,B,C).execute();
             sch_par(A()=Cplx{1.0,0.0})(B()=Cplx{1.0,0.0})(C()=Cplx{0.0,0.0}).execute();
             auto t0 = Clock::now();
