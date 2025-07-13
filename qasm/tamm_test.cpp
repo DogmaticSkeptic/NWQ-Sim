@@ -20,8 +20,8 @@ int main(int argc, char* argv[]) {
 
     // 1) Bond dimensions to test
     std::vector<size_t> sizes;
-    const size_t N_min = 1, N_max = 200;
-    const int num_N = 1000;
+    const size_t N_min = 1, N_max = 1000;
+    const int num_N = 10;
     const double stepN = double(N_max - N_min) / double(num_N - 1);
     for(int idx=0; idx<num_N; ++idx)
         sizes.push_back(size_t(std::round(N_min + idx*stepN)));
