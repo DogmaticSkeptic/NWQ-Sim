@@ -5,6 +5,7 @@
 #include <iostream>
 #include <vector>
 #include <tamm/tamm.hpp>
+#include <itensor/all.h>
 
 int main(int argc, char* argv[]) {
     using Cplx = std::complex<double>;
@@ -19,7 +20,7 @@ int main(int argc, char* argv[]) {
     std::string filename = argv[6];
 
     std::ofstream ofs(filename);
-    ofs << "#subranks parallel_time[s] sequential_time[s]\n";
+    ofs << "#subranks parallel_time[s] tamm_sequential_time[s] itensor_sequential_time[s]\n";
 
     for(int subranks = min_sub; subranks <= max_sub; subranks += step_sub) {
         std::vector<size_t> tasks(ntasks, N);
@@ -84,15 +85,36 @@ int main(int argc, char* argv[]) {
         auto t3 = std::chrono::high_resolution_clock::now();
         double tseq = std::chrono::duration<double>(t3 - t2).count();
 
+        auto t_it0 = std::chrono::high_resolution_clock::now();
+        for(int i = 0; i < ntasks; ++i) {
+            size_t M  = tasks[static_cast<size_t>(i)];
+            size_t bt = std::min(M, size_t(64));
+            itensor::Index l("l", M);
+            itensor::Index p1("p1", 2);
+            itensor::Index p2("p2", 2);
+            itensor::Index b("b", bt);
+            itensor::Index r("r", M);
+
+            itensor::ITensor A_it(l,p1,b);
+            itensor::ITensor B_it(b,p2,r);
+            itensor::ITensor C_it(l,p1,p2,r);
+
+            A_it.fill(1.0);
+            B_it.fill(1.0);
+            C_it = A_it * B_it;
+        }
+        auto t_it1 = std::chrono::high_resolution_clock::now();
+        double titensor = std::chrono::duration<double>(t_it1 - t_it0).count();
+
         if(world_pg.rank().value() == 0) {
             ofs << subranks << " "
-                << std::fixed << std::setprecision(6) << tpar << " "
-                << std::fixed << std::setprecision(6) << tseq << "\n";
+                << std::fixed << std::setprecision(6) << tpar      << " "
+                << std::fixed << std::setprecision(6) << tseq     << " "
+                << std::fixed << std::setprecision(6) << titensor << "\n";
         }
     }
 
     tamm::finalize();
     return 0;
 }
-
 

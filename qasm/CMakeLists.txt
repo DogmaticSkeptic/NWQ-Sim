@@ -59,6 +59,8 @@ endif()
 if (ITENSOR_FOUND)
     target_link_libraries(nwq_qasm PRIVATE itensor)
     target_compile_definitions(nwq_qasm PUBLIC ITENSOR_ENABLED)
+    target_link_libraries(tamm_parallel PRIVATE itensor)
+    target_compile_definitions(tamm_parallel PUBLIC ITENSOR_ENABLED)
 endif()
 
 # If TAMM is found, enable the TN TAMM backend
