@@ -21,7 +21,7 @@ int main(int argc, char* argv[]) {
     // 1) Bond dimensions to test
     std::vector<size_t> sizes;
     const size_t N_min = 1, N_max = 200;
-    const int num_N = 10;
+    const int num_N = 1000;
     const double stepN = double(N_max - N_min) / double(num_N - 1);
     for(int idx=0; idx<num_N; ++idx)
         sizes.push_back(size_t(std::round(N_min + idx*stepN)));
@@ -90,7 +90,7 @@ int main(int argc, char* argv[]) {
         for(size_t tile_val : tile_sizes) {
         for(size_t N : sizes) {
             // a) TiledIndexSpaces
-            auto btile = static_cast<tamm::Tile>(std::min(tile_val,N));
+            auto btile = static_cast<tamm::Tile>(tile_val);
             tamm::TiledIndexSpace bond_tis{tamm::IndexSpace{tamm::range(N)}, btile};
             tamm::TiledIndexSpace phys_tis{tamm::IndexSpace{tamm::range(2)},   1};
 
