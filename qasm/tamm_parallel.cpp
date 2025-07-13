@@ -30,7 +30,7 @@ int main(int argc, char* argv[]) {
     double seq_exec_time = 0.0;
     for(int i = 0; i < ntasks; ++i) {
         size_t M = tasks[static_cast<size_t>(i)];
-        tamm::Tile bt = static_cast<tamm::Tile>(std::min(M, size_t(64)));
+        tamm::Tile bt = static_cast<tamm::Tile>(164);
         tamm::TiledIndexSpace bond{tamm::IndexSpace{tamm::range(M)}, bt};
         tamm::TiledIndexSpace phys{tamm::IndexSpace{tamm::range(2)}, 1};
         auto [l,b,r] = bond.labels<3>("all");
@@ -85,7 +85,7 @@ int main(int argc, char* argv[]) {
         int count = 0;
         while(next < ntasks) {
             size_t M = tasks[static_cast<size_t>(next)];
-            tamm::Tile bt = static_cast<tamm::Tile>(std::min(M, size_t(64)));
+            tamm::Tile bt = static_cast<tamm::Tile>(164);
             tamm::TiledIndexSpace bond{tamm::IndexSpace{tamm::range(M)}, bt};
             tamm::TiledIndexSpace phys{tamm::IndexSpace{tamm::range(2)}, 1};
             auto [l,b,r] = bond.labels<3>("all");
