@@ -27,12 +27,7 @@ int main(int argc, char* argv[]) {
     };
     tamm::Scheduler sch_seq{ec_seq};
 
-    double alloc_time = 0.0;
-    double init_time = 0.0;
-    double exec_time = 0.0;
-    double dealloc_time = 0.0;
-
-    auto t_seq_start = Clock::now();
+    auto t2 = Clock::now();
     for(int i = 0; i < ntasks; ++i) {
         size_t M = tasks[static_cast<size_t>(i)];
         tamm::Tile bt = static_cast<tamm::Tile>(164);
@@ -43,30 +38,13 @@ int main(int argc, char* argv[]) {
 
         tamm::Tensor<Cplx> A({l,p1,b}), B({b,p2,r}), C({l,p1,p2,r});
         A.set_dense(); B.set_dense(); C.set_dense();
-
-        auto t0 = Clock::now();
         sch_seq.allocate(A,B,C).execute();
-        auto t1 = Clock::now();
-        alloc_time += std::chrono::duration<double>(t1 - t0).count();
-
-        auto t2 = Clock::now();
         sch_seq(A()=Cplx{1.0,0.0})(B()=Cplx{1.0,0.0})(C()=Cplx{0.0,0.0}).execute();
-        auto t3 = Clock::now();
-        init_time += std::chrono::duration<double>(t3 - t2).count();
-
-        auto t4 = Clock::now();
         sch_seq(C(l,p1,p2,r)=A(l,p1,b)*B(b,p2,r)).execute(tamm::ExecutionHW::CPU,false);
-        auto t5 = Clock::now();
-        exec_time += std::chrono::duration<double>(t5 - t4).count();
-
-        auto t6 = Clock::now();
         sch_seq.deallocate(A,B,C).execute();
-        auto t7 = Clock::now();
-        dealloc_time += std::chrono::duration<double>(t7 - t6).count();
     }
-    auto t_seq_end = Clock::now();
-    double seq_total = std::chrono::duration<double>(t_seq_end - t_seq_start).count();
-    double avg_time = seq_total / ntasks;
+    auto t3 = Clock::now();
+    double tseq = std::chrono::duration<double>(t3 - t2).count();
 
     auto t_it0 = Clock::now();
     for(int i = 0; i < ntasks; ++i) {
@@ -92,16 +70,6 @@ int main(int argc, char* argv[]) {
 
     std::ofstream ofs(filename);
     ofs << "#subranks parallel_time[s] tamm_sequential_time[s] itensor_sequential_time[s]\n";
-    ofs << "#tamm_seq_alloc[s] tamm_seq_init[s] tamm_seq_exec[s] tamm_seq_dealloc[s] "
-        << "tamm_seq_total[s] tamm_seq_avg_per_task[s]\n";
-    if(world_pg.rank().value() == 0) {
-        std::cout << "tamm_seq_alloc " << alloc_time << "\n";
-        std::cout << "tamm_seq_init  " << init_time  << "\n";
-        std::cout << "tamm_seq_exec  " << exec_time  << "\n";
-        std::cout << "tamm_seq_dealloc " << dealloc_time << "\n";
-        std::cout << "tamm_seq_total " << seq_total << "\n";
-        std::cout << "tamm_seq_avg_per_task " << avg_time << "\n";
-    }
 
     for(int subranks = min_sub; subranks <= max_sub; subranks += step_sub) {
         tamm::ProcGroup task_pg =
@@ -110,6 +78,11 @@ int main(int argc, char* argv[]) {
             task_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga
         };
         tamm::Scheduler sch_par{ec_par};
+
+        double par_alloc_time = 0.0;
+        double par_init_time = 0.0;
+        double par_exec_time = 0.0;
+        double par_dealloc_time = 0.0;
 
         tamm::AtomicCounterGA ac{world_pg,1};
         ac.allocate(0);
@@ -128,23 +101,56 @@ int main(int argc, char* argv[]) {
 
             tamm::Tensor<Cplx> A({l,p1,b}), B({b,p2,r}), C({l,p1,p2,r});
             A.set_dense(); B.set_dense(); C.set_dense();
+
+            auto ta0 = Clock::now();
             sch_par.allocate(A,B,C).execute();
+            auto ta1 = Clock::now();
+            par_alloc_time += std::chrono::duration<double>(ta1 - ta0).count();
+
+            auto ti0 = Clock::now();
             sch_par(A()=Cplx{1.0,0.0})(B()=Cplx{1.0,0.0})(C()=Cplx{0.0,0.0}).execute();
+            auto ti1 = Clock::now();
+            par_init_time += std::chrono::duration<double>(ti1 - ti0).count();
+
+            auto te0 = Clock::now();
             sch_par(C(l,p1,p2,r)=A(l,p1,b)*B(b,p2,r)).execute(ec_par.exhw(),false);
+            auto te1 = Clock::now();
+            par_exec_time += std::chrono::duration<double>(te1 - te0).count();
+
+            auto td0 = Clock::now();
             sch_par.deallocate(A,B,C).execute();
+            auto td1 = Clock::now();
+            par_dealloc_time += std::chrono::duration<double>(td1 - td0).count();
 
             if(task_pg.rank().value() == 0) next = ac.fetch_add(0,1);
             task_pg.broadcast(&next,0);
         }
         auto t1 = Clock::now();
-        double tpar = std::chrono::duration<double>(t1 - t0).count();
+        double tpar_total = std::chrono::duration<double>(t1 - t0).count();
         ac.deallocate();
+        double tpar_avg = tpar_total / ntasks;
+        double par_alloc_avg = par_alloc_time / ntasks;
+        double par_init_avg = par_init_time / ntasks;
+        double par_exec_avg = par_exec_time / ntasks;
+        double par_dealloc_avg = par_dealloc_time / ntasks;
 
         if(world_pg.rank().value() == 0) {
             ofs << subranks << " "
-                << std::fixed << std::setprecision(6) << tpar      << " "
-                << std::fixed << std::setprecision(6) << seq_total << " "
+                << std::fixed << std::setprecision(6) << tpar_total << " "
+                << std::fixed << std::setprecision(6) << tseq     << " "
                 << std::fixed << std::setprecision(6) << titensor << "\n";
+
+            std::cout << std::fixed << std::setprecision(6)
+                      << "subranks " << subranks
+                      << " parallel_alloc_total[s] " << par_alloc_time
+                      << " parallel_alloc_avg_per_task[s] " << par_alloc_avg
+                      << " parallel_init_total[s] " << par_init_time
+                      << " parallel_init_avg_per_task[s] " << par_init_avg
+                      << " parallel_exec_total[s] " << par_exec_time
+                      << " parallel_exec_avg_per_task[s] " << par_exec_avg
+                      << " parallel_dealloc_total[s] " << par_dealloc_time
+                      << " parallel_dealloc_avg_per_task[s] " << par_dealloc_avg
+                      << "\n";
         }
     }
 
