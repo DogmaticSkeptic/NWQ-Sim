@@ -60,6 +60,15 @@ endif()
 
 # If TAMM is found, enable the TN TAMM backend
 if (TAMM_FOUND)
-    target_link_libraries(nwq_qasm PRIVATE tamm::tamm ${SLATE_LIB})
+    target_link_libraries(nwq_qasm 
+    tamm::tamm 
+    ${SLATE_LIB}
+    ${LAPACKPP_LIB}
+    ${BLASPP_LIB}
+    CUDA::cudart
+    CUDA::cublas
+    CUDA::cublasLt
+    CUDA::cusolver
+    )
     target_compile_definitions(nwq_qasm PUBLIC TAMM_ENABLED)
 endif()

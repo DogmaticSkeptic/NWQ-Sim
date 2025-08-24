@@ -94,18 +94,18 @@ endif()
 
 # Hardcoded Spack install prefixes for Perlmutter E4S v0.22
 set(SLATE_PREFIX    /global/common/software/spackecp/perlmutter/v0.22/96029/spack/opt/spack/linux-sles15-zen3/gcc-12.3.0/slate-2023.11.05-x4dznn44tjb5l3tpl7s7uuogu3o5qfdz)
-#set(LAPACKPP_PREFIX /global/common/software/spackecp/perlmutter/v0.22/96029/spack/opt/spack/linux-sles15-zen3/gcc-12.3.0/lapackpp-2023.11.05-pph2uwrfujonebbyueaptvnm3elgz77e)
-#set(BLASPP_PREFIX   /global/common/software/spackecp/perlmutter/v0.22/96029/spack/opt/spack/linux-sles15-zen3/gcc-12.3.0/blaspp-2023.11.05-uffk4lufpj5ne7itkn27wcqcmj42zi5u)
+set(LAPACKPP_PREFIX /global/common/software/spackecp/perlmutter/v0.22/96029/spack/opt/spack/linux-sles15-zen3/gcc-12.3.0/lapackpp-2023.11.05-pph2uwrfujonebbyueaptvnm3elgz77e)
+set(BLASPP_PREFIX   /global/common/software/spackecp/perlmutter/v0.22/96029/spack/opt/spack/linux-sles15-zen3/gcc-12.3.0/blaspp-2023.11.05-uffk4lufpj5ne7itkn27wcqcmj42zi5u)
 
 # Paths to headers
 set(SLATE_INC    ${SLATE_PREFIX}/include)
-#set(LAPACKPP_INC ${LAPACKPP_PREFIX}/include)
-#set(BLASPP_INC   ${BLASPP_PREFIX}/include)
+set(LAPACKPP_INC ${LAPACKPP_PREFIX}/include)
+set(BLASPP_INC   ${BLASPP_PREFIX}/include)
 
 # Paths to library files
 set(SLATE_LIB    ${SLATE_PREFIX}/lib64/libslate.so)
-#set(LAPACKPP_LIB ${LAPACKPP_PREFIX}/lib64/liblapackpp.so)
-#set(BLASPP_LIB   ${BLASPP_PREFIX}/lib64/libblaspp.so)
+set(LAPACKPP_LIB ${LAPACKPP_PREFIX}/lib64/liblapackpp.so)
+set(BLASPP_LIB   ${BLASPP_PREFIX}/lib64/libblaspp.so)
 
 # Verification of paths
 foreach(path_var IN ITEMS SLATE_INC LAPACKPP_INC BLASPP_INC)
