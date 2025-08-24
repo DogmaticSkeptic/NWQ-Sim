@@ -60,6 +60,6 @@ endif()
 
 # If TAMM is found, enable the TN TAMM backend
 if (TAMM_FOUND)
-    target_link_libraries(nwq_qasm PRIVATE tamm::tamm)
+    target_link_libraries(nwq_qasm PRIVATE tamm::tamm ${SLATE_LIB})
     target_compile_definitions(nwq_qasm PUBLIC TAMM_ENABLED)
 endif()
