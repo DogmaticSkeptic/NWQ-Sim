@@ -38,3 +38,4 @@ export PPn=4
 
 export LD_LIBRARY_PATH=/opt/cray/pe/gcc/12.2.0/snos/lib64:$LD_LIBRARY_PATH
 export LD_PRELOAD=/opt/cray/pe/gcc/12.2.0/snos/lib64/libgcc_s.so.1:/opt/cray/pe/gcc/12.2.0/snos/lib64/libstdc++.so.6
+export CUDA_124=/opt/nvidia/hpc_sdk/Linux_x86_64/24.5/cuda/12.4
