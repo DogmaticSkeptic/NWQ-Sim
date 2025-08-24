@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+module load spack/0.22
+spack env activate cuda
+spack load slate lapackpp blaspp
+
 # Source the baseline Perlmutter settings
 source ./environment/setup_perlmutter.sh
 
@@ -9,6 +13,7 @@ module load cpe-cuda
 module load cudatoolkit
 module unload craype-accel-nvidia80
 
+module load gcc
 # Link against dynamic libraries (disable static Cray libsci)
 export CRAYPE_LINK_TYPE=dynamic
 
@@ -31,3 +36,5 @@ export GA_PROGRESS_RANKS_DISTRIBUTION_PACKED=1
 
 export PPn=4
 
+export LD_LIBRARY_PATH=/opt/cray/pe/gcc/12.2.0/snos/lib64:$LD_LIBRARY_PATH
+export LD_PRELOAD=/opt/cray/pe/gcc/12.2.0/snos/lib64/libgcc_s.so.1:/opt/cray/pe/gcc/12.2.0/snos/lib64/libstdc++.so.6
