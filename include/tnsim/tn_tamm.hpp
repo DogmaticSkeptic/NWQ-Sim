@@ -35,6 +35,8 @@
 
 #include <tamm/tamm.hpp>
 
+#include <slate/slate.hh>
+
 #include <Eigen/Dense>
 #include <gsl/span>
 #include <iostream>
