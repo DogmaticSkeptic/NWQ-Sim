@@ -60,15 +60,28 @@ endif()
 
 # If TAMM is found, enable the TN TAMM backend
 if (TAMM_FOUND)
-    target_link_libraries(nwq_qasm 
-    tamm::tamm 
-    ${SLATE_LIB}
-    ${LAPACKPP_LIB}
-    ${BLASPP_LIB}
-    CUDA::cudart
-    CUDA::cublas
-    CUDA::cublasLt
-    CUDA::cusolver
+    if(CUDAToolkit_FOUND)
+        get_target_property(_cudart CUDA::cudart IMPORTED_LOCATION)
+        get_filename_component(_cuda_libdir ${_cudart} DIRECTORY)
+        list(APPEND CMAKE_BUILD_RPATH ${_cuda_libdir})
+    endif()
+
+    # Keep keyword signature consistently
+    target_link_libraries(nwq_qasm PRIVATE
+        ${SLATE_LIB}
+        ${LAPACKPP_LIB}
+        ${BLASPP_LIB}
     )
+
+    if(CUDAToolkit_FOUND)
+        target_link_libraries(nwq_qasm PRIVATE
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cublasLt
+            CUDA::cusolver
+        )
+    endif()
+
+    target_link_libraries(nwq_qasm PRIVATE OpenMP::OpenMP_CXX tamm::tamm)
     target_compile_definitions(nwq_qasm PUBLIC TAMM_ENABLED)
 endif()
