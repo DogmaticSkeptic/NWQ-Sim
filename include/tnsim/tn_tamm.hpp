@@ -52,6 +52,8 @@
 namespace NWQSim
 {
 
+    using Cplx = std::complex<ValType>;
+
     class TN_TAMM;
 
     struct GateUpdateResult {
@@ -89,7 +91,6 @@ namespace NWQSim
         }
     };
 
-    using Cplx = std::complex<ValType>;
     using Eigen::Index;
     class TN_TAMM : public QuantumState
     {
@@ -288,7 +289,7 @@ namespace NWQSim
 
         static inline SVGate make_swap_sv(int a, int b)
         {
-            SVGate s;
+            SVGate s{};
             s.op_name = OP::C2;
             s.ctrl = a;
             s.qubit = b;
@@ -306,7 +307,7 @@ namespace NWQSim
     
         static inline SVGate make_local_c2_sv(const SVGate& g, int left, int right)
         {
-            SVGate t;
+            SVGate t{};
             t.op_name = OP::C2;
             t.ctrl = left;
             t.qubit = right;
@@ -682,57 +683,67 @@ namespace NWQSim
             std::vector<Cplx>& U_row,
             std::vector<Cplx>& VT_row)
         {
-            // Use Zgesvdj for double-complex matrices
-            cusolverDnZgesvdjSetTolerance(cu_ctx_.jp, 1e-14); // Example tolerance
-            cusolverDnZgesvdjSetMaxSweeps(cu_ctx_.jp, 100);    // Example sweeps
-
+            cusolverDnXgesvdjSetTolerance(cu_ctx_.jp, 1e-14);
+            cusolverDnXgesvdjSetMaxSweeps(cu_ctx_.jp, 100);
+        
             int lda = m;
             int ldu = m;
             int ldv = n;
-            int econ = 1; // Economy SVD
+            int econ = 1;
             int k = std::min(m, n);
-
+        
             cuDoubleComplex* d_A = nullptr;
             double* d_S = nullptr;
             cuDoubleComplex* d_U = nullptr;
             cuDoubleComplex* d_V = nullptr;
             int* d_info = nullptr;
-
-            cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * lda * n);
-            cudaMalloc((void**)&d_S, sizeof(double) * k);
-            cudaMalloc((void**)&d_U, sizeof(cuDoubleComplex) * ldu * k);
-            cudaMalloc((void**)&d_V, sizeof(cuDoubleComplex) * ldv * k);
+        
+            cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * (size_t)lda * (size_t)n);
+            cudaMalloc((void**)&d_S, sizeof(double) * (size_t)k);
+            cudaMalloc((void**)&d_U, sizeof(cuDoubleComplex) * (size_t)ldu * (size_t)k);
+            cudaMalloc((void**)&d_V, sizeof(cuDoubleComplex) * (size_t)ldv * (size_t)k);
             cudaMalloc((void**)&d_info, sizeof(int));
-
-            cudaMemcpyAsync(d_A, A_h, sizeof(cuDoubleComplex) * lda * n, cudaMemcpyHostToDevice, cu_ctx_.stream);
-
+        
+            cudaMemcpyAsync(d_A, reinterpret_cast<const cuDoubleComplex*>(A_h),
+                            sizeof(cuDoubleComplex) * (size_t)lda * (size_t)n,
+                            cudaMemcpyHostToDevice, cu_ctx_.stream);
+        
             int lwork_req = 0;
-            cusolverDnZgesvdj_bufferSize(cu_ctx_.solver, CUSOLVER_EIG_MODE_VECTOR, econ, m, n, d_A, lda, d_S, d_U, ldu, d_V, ldv, &lwork_req, cu_ctx_.jp);
-
+            cusolverDnZgesvdj_bufferSize(cu_ctx_.solver, CUSOLVER_EIG_MODE_VECTOR, econ,
+                                         m, n, d_A, lda, d_S, d_U, ldu, d_V, ldv,
+                                         &lwork_req, cu_ctx_.jp);
+        
             if (lwork_req > cu_ctx_.lwork_jac) {
                 if (cu_ctx_.d_work_jac) cudaFree(cu_ctx_.d_work_jac);
                 cu_ctx_.lwork_jac = lwork_req;
-                cudaMalloc((void**)&cu_ctx_.d_work_jac, sizeof(cuDoubleComplex) * cu_ctx_.lwork_jac);
+                cudaMalloc((void**)&cu_ctx_.d_work_jac, sizeof(cuDoubleComplex) * (size_t)cu_ctx_.lwork_jac);
             }
-
-            cusolverDnZgesvdj(cu_ctx_.solver, CUSOLVER_EIG_MODE_VECTOR, econ, m, n, d_A, lda, d_S, d_U, ldu, d_V, ldv, cu_ctx_.d_work_jac, cu_ctx_.lwork_jac, d_info, cu_ctx_.jp);
+        
+            cusolverDnZgesvdj(cu_ctx_.solver, CUSOLVER_EIG_MODE_VECTOR, econ,
+                              m, n, d_A, lda, d_S, d_U, ldu, d_V, ldv,
+                              reinterpret_cast<cuDoubleComplex*>(cu_ctx_.d_work_jac),
+                              cu_ctx_.lwork_jac, d_info, cu_ctx_.jp);
+        
             cudaStreamSynchronize(cu_ctx_.stream);
-
-            S.resize(k);
-            std::vector<Cplx> U_col(ldu * k);
-            std::vector<Cplx> V_col(ldv * k);
-
-            cudaMemcpy(S.data(), d_S, sizeof(double) * k, cudaMemcpyDeviceToHost);
-            cudaMemcpy(U_col.data(), d_U, sizeof(Cplx) * ldu * k, cudaMemcpyDeviceToHost);
-            cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * ldv * k, cudaMemcpyDeviceToHost);
-
-            // Convert from column-major (CUDA/Fortran) to row-major (C++)
-            U_row.resize(m * k);
-            for(int i = 0; i < m; ++i) for(int j = 0; j < k; ++j) U_row[i * k + j] = U_col[i + j * ldu];
-
-            VT_row.resize(k * n);
-            for(int i = 0; i < k; ++i) for(int j = 0; j < n; ++j) VT_row[i * n + j] = std::conj(V_col[j + i * ldv]);
-
+        
+            S.resize((size_t)k);
+            std::vector<Cplx> U_col((size_t)ldu * (size_t)k);
+            std::vector<Cplx> V_col((size_t)ldv * (size_t)k);
+        
+            cudaMemcpy(S.data(), d_S, sizeof(double) * (size_t)k, cudaMemcpyDeviceToHost);
+            cudaMemcpy(U_col.data(), d_U, sizeof(Cplx) * (size_t)ldu * (size_t)k, cudaMemcpyDeviceToHost);
+            cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * (size_t)ldv * (size_t)k, cudaMemcpyDeviceToHost);
+        
+            U_row.resize((size_t)m * (size_t)k);
+            for (int i = 0; i < m; ++i)
+                for (int j = 0; j < k; ++j)
+                    U_row[(size_t)i * (size_t)k + (size_t)j] = U_col[(size_t)i + (size_t)j * (size_t)ldu];
+        
+            VT_row.resize((size_t)k * (size_t)n);
+            for (int i = 0; i < k; ++i)
+                for (int j = 0; j < n; ++j)
+                    VT_row[(size_t)i * (size_t)n + (size_t)j] = std::conj(V_col[(size_t)j + (size_t)i * (size_t)ldv]);
+        
             cudaFree(d_info);
             cudaFree(d_V);
             cudaFree(d_U);
