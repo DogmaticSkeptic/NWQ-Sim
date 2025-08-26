@@ -530,6 +530,9 @@ namespace NWQSim
             return local_results;
         }
         std::vector<GateUpdateMetadata> allgather_metadata(const std::vector<GateUpdateResult>& local_results) {
+            int rank = pg.rank().value();
+            std::cout << "[RANK " << rank << "] >> Entering allgather_metadata. Processing " << local_results.size() << " local results." << std::endl;
+
             // 1. Create a POD-safe metadata vector from this rank's local results.
             std::vector<GateUpdateMetadata> local_metadata;
             local_metadata.reserve(local_results.size());
@@ -544,14 +547,23 @@ namespace NWQSim
                     });
                 }
             }
+            std::cout << "[RANK " << rank << "] allgather_metadata: Created " << local_metadata.size() << " local metadata entries." << std::endl;
         
             // 2. Gather the number of metadata entries (in bytes) each rank will send.
             int local_size_bytes = local_metadata.size() * sizeof(GateUpdateMetadata);
             std::vector<int> all_sizes_bytes(pg.size().value());
             
-            // CORRECTED: Use the correct 4-argument version of TAMM's allgather.
-            // (send_buf, send_count, recv_buf, recv_count)
+            std::cout << "[RANK " << rank << "] allgather_metadata: Calling allgather for sizes. This rank is sending size " << local_size_bytes << " bytes." << std::endl;
             pg.allgather(&local_size_bytes, 1, all_sizes_bytes.data(), 1);
+            
+            // Optional: Print what sizes this rank received from everyone
+            if (rank == 0) { // Only rank 0 prints to avoid clutter
+                std::cout << "[RANK 0] allgather_metadata: Received sizes from all ranks (bytes): [";
+                for(size_t i = 0; i < all_sizes_bytes.size(); ++i) {
+                    std::cout << all_sizes_bytes[i] << (i == all_sizes_bytes.size() - 1 ? "" : ", ");
+                }
+                std::cout << "]" << std::endl;
+            }
         
             // 3. Calculate displacements (in bytes) for the Allgatherv operation.
             std::vector<int> displacements_bytes(pg.size().value(), 0);
@@ -560,44 +572,51 @@ namespace NWQSim
                 displacements_bytes[i] = displacements_bytes[i-1] + all_sizes_bytes[i-1];
                 total_size_bytes += all_sizes_bytes[i];
             }
+            std::cout << "[RANK " << rank << "] allgather_metadata: Calculated displacements. Total metadata size: " << total_size_bytes << " bytes." << std::endl;
             
             // 4. Perform the Allgatherv using the raw MPI communicator.
-            // TAMM's ProcGroup does not have an allgatherv, so we use MPI directly.
             std::vector<GateUpdateMetadata> all_metadata(total_size_bytes / sizeof(GateUpdateMetadata));
-            MPI_Allgatherv(local_metadata.data(),           // send buffer
-                           local_size_bytes,                // send count in bytes
-                           MPI_BYTE,                        // send type
-                           all_metadata.data(),             // receive buffer
-                           all_sizes_bytes.data(),          // receive counts in bytes
-                           displacements_bytes.data(),      // displacements in bytes
-                           MPI_BYTE,                        // receive type
-                           pg.comm());                      // Get MPI_Comm from tamm::ProcGroup
-        
+            std::cout << "[RANK " << rank << "] allgather_metadata: Calling MPI_Allgatherv..." << std::endl;
+            MPI_Allgatherv(local_metadata.data(),
+                           local_size_bytes,
+                           MPI_BYTE,
+                           all_metadata.data(),
+                           all_sizes_bytes.data(),
+                           displacements_bytes.data(),
+                           MPI_BYTE,
+                           pg.comm());
+            
+            std::cout << "[RANK " << rank << "] << Exiting allgather_metadata. Total metadata entries gathered: " << all_metadata.size() << std::endl;
             return all_metadata;
         }
 
         void apply_collective_updates(std::vector<GateUpdateResult>& local_results)
         {
+            int rank = pg.rank().value();
+            std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
+
             // Phase 2a: Every rank sends its metadata and receives everyone else's.
             auto all_metadata = allgather_metadata(local_results);
+            std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
 
-            // Use the GLOBAL scheduler for all collective operations.
             tamm::Scheduler sch{ec};
-            int local_result_idx = 0; // This rank's index into its own local_results vector.
+            int local_result_idx = 0;
 
-            // Phase 2b: Iterate through the complete list of updates. All ranks do this.
+            int meta_idx = 0;
             for (const auto& meta : all_metadata)
             {
                 if (!meta.is_valid) continue;
 
+                std::cout << "[RANK " << rank << "] apply_collective_updates: Processing update #" << meta_idx 
+                          << " for q(" << meta.q0 << ", " << meta.q1 << ") from rank " << meta.original_rank 
+                          << ". New bond dim: " << (int)meta.new_bond_dim << std::endl;
+
                 IdxType q0 = meta.q0;
                 IdxType q1 = meta.q1;
 
-                // 1. COLLECTIVELY schedule the deallocation of the old global tensors.
+                std::cout << "[RANK " << rank << "] apply_collective_updates: Scheduling deallocate for old tensors on sites " << q0 << " and " << q1 << "." << std::endl;
                 sch.deallocate(mps_tensors[q0], mps_tensors[q1]);
 
-                // 2. All ranks update their local metadata (bond_tis) and
-                //    COLLECTIVELY schedule the allocation of the new global tensors.
                 tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
                 bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
 
@@ -605,35 +624,34 @@ namespace NWQSim
                 mps_tensors[q1] = tamm::Tensor<Cplx>{bond_tis[q0 + 1], phys_tis[q1], bond_tis[q1 + 1]};
                 mps_tensors[q0].set_dense();
                 mps_tensors[q1].set_dense();
-
+                
+                std::cout << "[RANK " << rank << "] apply_collective_updates: Scheduling allocate for new tensors on sites " << q0 << " and " << q1 << "." << std::endl;
                 sch.allocate(mps_tensors[q0], mps_tensors[q1]);
 
-                // 3. ONLY the worker rank that computed this result schedules the scatter operation.
                 if (pg.rank().value() == meta.original_rank) {
-                    // Find the corresponding local result tensor for this metadata entry.
+                    std::cout << "[RANK " << rank << "] apply_collective_updates: This is the original rank. Scheduling scatter operation." << std::endl;
                     const auto& result = local_results[local_result_idx++];
                     
-                    // Sanity check to ensure metadata and local results are in sync.
                     assert(result.q0 == meta.q0 && result.q1 == meta.q1);
 
                     sch(mps_tensors[q0]("l","p","b") = result.new_T0_local("l","p","b"));
                     sch(mps_tensors[q1]("b","p","r") = result.new_T1_local("b","p","r"));
                 }
+                meta_idx++;
             }
 
-            // Phase 2c: Execute ALL scheduled operations for the entire layer at once.
-            // This includes all deallocations, allocations, and scatter operations.
-            // TAMM's dependency analysis ensures they happen in the correct order.
+            std::cout << "[RANK " << rank << "] apply_collective_updates: All operations for this layer have been scheduled. Calling sch.execute()..." << std::endl;
             sch.execute(exec_hw);
+            std::cout << "[RANK " << rank << "] apply_collective_updates: sch.execute() finished." << std::endl;
 
-            // Phase 2d: Now that all data has been scattered, each rank can safely
-            // deallocate the temporary local tensors it created.
+            std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocating local result tensors..." << std::endl;
             for (auto& result : local_results) {
                 if(result.is_valid) {
                     result.new_T0_local.deallocate();
                     result.new_T1_local.deallocate();
                 }
             }
+            std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
 
         void C1_GATE(const std::array<Cplx, 4> &U, IdxType site, tamm::Scheduler& sch_local)
