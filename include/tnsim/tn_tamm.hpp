@@ -399,7 +399,7 @@ namespace NWQSim
         IdxType* result = nullptr;
         CuCtx cu_ctx_;
 
-        virtual void simulation_kernel(const std::vector<SVGate> &gates) override
+        virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             // Get the rank of the current process for printing
             int rank = pg.rank().value();
