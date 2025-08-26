@@ -756,7 +756,7 @@ namespace NWQSim
             cudaFree(d_A);
         }
 
-        void local_svd_and_reconstruct_tensors(
+        inline void TN_TAMM::local_svd_and_reconstruct_tensors(
             tamm::Tensor<Cplx>& M2_local,
             tamm::Tensor<Cplx>& Ti_new_local,
             tamm::Tensor<Cplx>& Tj_new_local,
@@ -764,47 +764,68 @@ namespace NWQSim
             tamm::Scheduler& sch_local)
         {
             auto& ec_local = sch_local.ec();
-            
-            // 1. Extract data from local TAMM tensor into a column-major host buffer
+            const IdxType phys_dim = 2; // Physical dimension of a qubit is always 2.
+        
+            //================================================================================
+            // STEP 1: Extract data from the local TAMM tensor and reshape it into a 2D
+            //         column-major matrix suitable for cuSOLVER.
+            // TAMM Tensor dimensions: (Dl, phys_dim, phys_dim, Dr)
+            // Matrix dimensions:      (Dl * phys_dim) x (phys_dim * Dr)
+            //================================================================================
             IdxType Dl = bond_dims[q0];
             IdxType Dr = bond_dims[q1 + 1];
-            int m = Dl * 2;
-            int n = 2 * Dr;
+            int m = Dl * phys_dim;
+            int n = phys_dim * Dr;
             std::vector<Cplx> M2_col_major(m * n);
-
+        
             std::vector<Cplx> M2_hostbuf(M2_local.size());
-            M2_local.get(M2_local.loop_nest()[0], M2_hostbuf);
-
+            // CORRECTED: Use an iterator to get the single block ID from the loop nest.
+            M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
+        
             size_t c = 0;
             for (size_t l = 0; l < Dl; ++l)
-            for (size_t p0 = 0; p0 < 2; ++p0)
-            for (size_t p1 = 0; p1 < 2; ++p1)
+            for (size_t p0 = 0; p0 < phys_dim; ++p0)
+            for (size_t p1 = 0; p1 < phys_dim; ++p1)
             for (size_t r = 0; r < Dr; ++r, ++c)
             {
-                size_t row = l * 2 + p0;
+                size_t row = l * phys_dim + p0;
                 size_t col = p1 * Dr + r;
+                // Convert from TAMM's C-style (row-major) layout to cuSOLVER's Fortran-style (column-major)
                 M2_col_major[row + col * m] = M2_hostbuf[c];
             }
-
-            // 2. Perform the SVD on the GPU
+        
+            //================================================================================
+            // STEP 2: Perform the Singular Value Decomposition on the GPU.
+            //================================================================================
             std::vector<double> S;
             std::vector<Cplx> U_row, VT_row;
             gpu_svd_jacobi(M2_col_major.data(), m, n, S, U_row, VT_row);
-
-            // 3. Truncate based on results
+        
+            //================================================================================
+            // STEP 3: Truncate the singular values to determine the new bond dimension.
+            //================================================================================
             std::vector<IdxType> keep;
             keep.reserve(S.size());
             for (size_t i = 0; i < S.size(); ++i) {
-                if (S[i] >= sv_cutoff) keep.push_back(i);
+                if (S[i] >= sv_cutoff) {
+                    keep.push_back(i);
+                }
             }
             IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
-            if (chi == 0) chi = 1;
-
+            if (chi == 0) {
+                chi = 1; // Bond dimension must be at least 1
+            }
+        
+            // Update the bond dimension metadata for the next gate layer.
             bond_dims[q0 + 1] = chi;
-            tamm::TiledIndexSpace new_bond_tis{tamm::IndexSpace{tamm::range(chi)}, block_size};
-
-            // 4. Reconstruct new local TAMM tensors from GPU results
-            // Build new left tensor Ti_new_local
+            // CORRECTED: Explicitly cast the signed int 'block_size' to the unsigned 'tamm::Tile'.
+            tamm::TiledIndexSpace new_bond_tis{tamm::IndexSpace{tamm::range(chi)}, static_cast<tamm::Tile>(block_size)};
+        
+            //================================================================================
+            // STEP 4: Reconstruct the new local TAMM tensors from the SVD results.
+            //================================================================================
+        
+            // Build the new left tensor Ti_new_local from the U matrix.
             Ti_new_local = tamm::Tensor<Cplx>({ bond_tis[q0], phys_tis[q0], new_bond_tis });
             Ti_new_local.set_dense();
             Ti_new_local.allocate(&ec_local);
@@ -812,29 +833,31 @@ namespace NWQSim
             std::vector<Cplx> Ti_hostbuf(Ti_new_local.size());
             c = 0;
             for (size_t l = 0; l < Dl; ++l)
-            for (size_t p0 = 0; p0 < 2; ++p0)
+            for (size_t p0 = 0; p0 < phys_dim; ++p0)
             for (size_t b = 0; b < chi; ++b, ++c)
             {
                 // U_row is row-major, so access is [row * num_cols + col]
-                Ti_hostbuf[c] = U_row[(l * 2 + p0) * chi + b];
+                Ti_hostbuf[c] = U_row[(l * phys_dim + p0) * chi + b];
             }
-            Ti_new_local.put(Ti_new_local.loop_nest()[0], Ti_hostbuf);
-
-            // Build new right tensor Tj_new_local
+            // CORRECTED: Use an iterator to get the single block ID.
+            Ti_new_local.put(*(Ti_new_local.loop_nest().begin()), Ti_hostbuf);
+        
+            // Build the new right tensor Tj_new_local from the S and V^T matrices.
             Tj_new_local = tamm::Tensor<Cplx>({ new_bond_tis, phys_tis[q1], bond_tis[q1 + 1] });
             Tj_new_local.set_dense();
             Tj_new_local.allocate(&ec_local);
-
+        
             std::vector<Cplx> Tj_hostbuf(Tj_new_local.size());
             c = 0;
             for (size_t b = 0; b < chi; ++b)
-            for (size_t p1 = 0; p1 < 2; ++p1)
+            for (size_t p1 = 0; p1 < phys_dim; ++p1)
             for (size_t r = 0; r < Dr; ++r, ++c)
             {
-                // VT_row is row-major. We also need to multiply by the singular value.
+                // VT_row is row-major. Multiply by the singular value.
                 Tj_hostbuf[c] = Cplx(S[b], 0.0) * VT_row[b * n + (p1 * Dr + r)];
             }
-            Tj_new_local.put(Tj_new_local.loop_nest()[0], Tj_hostbuf);
+            // CORRECTED: Use an iterator to get the single block ID.
+            Tj_new_local.put(*(Tj_new_local.loop_nest().begin()), Tj_hostbuf);
         }
 
         void right_canonicalize(std::vector<tamm::Tensor<Cplx>> &MPS)
