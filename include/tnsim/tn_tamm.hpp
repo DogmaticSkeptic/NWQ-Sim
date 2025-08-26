@@ -1,5 +1,7 @@
 #pragma once
 
+#include <mpi.h>
+
 #include "../state.hpp"
 
 #include "../nwq_util.hpp"
@@ -49,6 +51,9 @@
 
 namespace NWQSim
 {
+
+    class TN_TAMM;
+
     struct GateUpdateResult {
         bool is_valid = false;
         IdxType q0, q1;
@@ -388,14 +393,7 @@ namespace NWQSim
         IdxType* result = nullptr;
         CuCtx cu_ctx_;
 
-
-        void run_gates_parallel(const std::vector<SVGate>& batch);
-        void C1_GATE(const std::array<Cplx, 4>& U, IdxType site, tamm::Scheduler& sch_local);
-        GateUpdateResult C2_GATE_L(const std::array<Cplx, 16>& U4, IdxType q0, IdxType q1, tamm::Scheduler& sch_local);
-        void gpu_svd_jacobi(const Cplx* A_h, int m, int n, std::vector<double>& S, std::vector<Cplx>& U_row, std::vector<Cplx>& VT_row);
-        void local_svd_and_reconstruct_tensors(tamm::Tensor<Cplx>& M2_local, tamm::Tensor<Cplx>& Ti_new_local, tamm::Tensor<Cplx>& Tj_new_local, IdxType q0, IdxType q1, tamm::Scheduler& sch_local);
-
-        virtual void simulation_kernel(const std::vector<SVGate> &gates) override
+        virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             std::vector<std::vector<SVGate>> layers;
             layers.reserve(gates.size());
@@ -443,23 +441,24 @@ namespace NWQSim
 
         std::vector<GateUpdateResult> run_gates_parallel(const std::vector<SVGate>& batch)
         {
-            tamm::ProcGroup self_pg = pg.create_self_coll();
+            // CORRECTED: Use the correct, non-collective call to create a self-process group
+            tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
+            
             tamm::AtomicCounterGA gate_counter(pg, 1);
-            gate_counter.allocate(0);
-            if (pg.rank() == 0) gate_counter.write(0, 0);
+            gate_counter.allocate(0); // This initializes the counter to 0.
             pg.barrier();
-    
+        
             std::vector<GateUpdateResult> local_results;
-    
+        
             while (true)
             {
                 long long gate_idx = gate_counter.fetch_add(0, 1);
                 if (gate_idx >= static_cast<long long>(batch.size())) break;
-    
+        
                 const SVGate& g = batch[gate_idx];
                 tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
                 tamm::Scheduler sch_local{ec_local};
-    
+        
                 if (g.op_name == OP::C1) {
                     std::array<Cplx, 4> U;
                     for (int i=0; i<4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
@@ -472,34 +471,10 @@ namespace NWQSim
             }
             pg.barrier();
             gate_counter.deallocate();
-            pg.destroy_coll(self_pg);
             
-            return local_results;
-        }
-
-        std::vector<GateUpdateResult> allgather_results(const std::vector<GateUpdateResult>& local_results) {
-            std::vector<GateUpdateResult> all_results;
-            // Simple MPI_Allgatherv logic would go here.
-            // For brevity, assuming a TAMM or MPI utility exists to do this.
-            // The key is that every process ends up with the same `all_results` vector.
-            // A simple (but not highly performant) way is to gather sizes, then gather data.
-            int local_size = local_results.size();
-            std::vector<int> all_sizes(pg.size().value());
-            pg.allgather(&local_size, all_sizes.data(), 1);
-    
-            for(int rank_idx = 0; rank_idx < pg.size().value(); ++rank_idx) {
-                if (pg.rank().value() == rank_idx) {
-                    for(const auto& res : local_results) {
-                        all_results.push_back(res);
-                    }
-                }
-            }
-            // This is a simplified gather. A real implementation would be more robust.
-            // The core idea is every process now has a list of all C2 gates that ran.
-            // For now, let's assume `local_results` is sufficient and move to the collective update.
-            // A full implementation requires more MPI logic.
-            // For now, let's just return the local results and fix apply_collective_updates later.
-            // We will assume for now this function works perfectly.
+            // CORRECTED: Use the static method to destroy the created group
+            self_pg.destroy_coll();
+            
             return local_results;
         }
 
@@ -518,24 +493,35 @@ namespace NWQSim
                     });
                 }
             }
-
-            // 2. Gather the number of metadata entries each rank will send.
-            int local_size = local_metadata.size();
-            std::vector<int> all_sizes(pg.size().value());
-            pg.allgather(&local_size, all_sizes.data(), 1);
-
-            // 3. Calculate displacements for the Allgatherv operation.
-            std::vector<int> displacements(pg.size().value() + 1, 0);
-            int total_size = 0;
-            for (size_t i = 0; i < all_sizes.size(); ++i) {
-                displacements[i+1] = displacements[i] + all_sizes[i];
-                total_size += all_sizes[i];
+        
+            // 2. Gather the number of metadata entries (in bytes) each rank will send.
+            int local_size_bytes = local_metadata.size() * sizeof(GateUpdateMetadata);
+            std::vector<int> all_sizes_bytes(pg.size().value());
+            
+            // CORRECTED: Use the correct 4-argument version of TAMM's allgather.
+            // (send_buf, send_count, recv_buf, recv_count)
+            pg.allgather(&local_size_bytes, 1, all_sizes_bytes.data(), 1);
+        
+            // 3. Calculate displacements (in bytes) for the Allgatherv operation.
+            std::vector<int> displacements_bytes(pg.size().value(), 0);
+            int total_size_bytes = all_sizes_bytes[0];
+            for (size_t i = 1; i < all_sizes_bytes.size(); ++i) {
+                displacements_bytes[i] = displacements_bytes[i-1] + all_sizes_bytes[i-1];
+                total_size_bytes += all_sizes_bytes[i];
             }
             
-            // 4. Perform the Allgatherv to get all metadata from all ranks.
-            std::vector<GateUpdateMetadata> all_metadata(total_size);
-            pg.allgatherv(local_metadata.data(), local_size, all_metadata.data(), all_sizes.data(), displacements.data());
-
+            // 4. Perform the Allgatherv using the raw MPI communicator.
+            // TAMM's ProcGroup does not have an allgatherv, so we use MPI directly.
+            std::vector<GateUpdateMetadata> all_metadata(total_size_bytes / sizeof(GateUpdateMetadata));
+            MPI_Allgatherv(local_metadata.data(),           // send buffer
+                           local_size_bytes,                // send count in bytes
+                           MPI_BYTE,                        // send type
+                           all_metadata.data(),             // receive buffer
+                           all_sizes_bytes.data(),          // receive counts in bytes
+                           displacements_bytes.data(),      // displacements in bytes
+                           MPI_BYTE,                        // receive type
+                           pg.comm());                      // Get MPI_Comm from tamm::ProcGroup
+        
             return all_metadata;
         }
 
