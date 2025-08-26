@@ -756,7 +756,7 @@ namespace NWQSim
             cudaFree(d_A);
         }
 
-        void TN_TAMM::local_svd_and_reconstruct_tensors(
+        void local_svd_and_reconstruct_tensors(
             tamm::Tensor<Cplx>& M2_local,
             tamm::Tensor<Cplx>& Ti_new_local,
             tamm::Tensor<Cplx>& Tj_new_local,
