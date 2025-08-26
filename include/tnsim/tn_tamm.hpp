@@ -590,69 +590,69 @@ namespace NWQSim
             return all_metadata;
         }
 
-        virtual void simulation_kernel(const std::vector<SVGate> &gates) override
+        void apply_collective_updates(std::vector<GateUpdateResult>& local_results)
         {
-            // Get the rank of the current process for printing
             int rank = pg.rank().value();
+            std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
 
-            std::cout << "[RANK " << rank << "] ==> Entering simulation_kernel." << std::endl;
+            // Phase 2a: Every rank sends its metadata and receives everyone else's.
+            auto all_metadata = allgather_metadata(local_results);
+            std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
 
-            std::vector<std::vector<SVGate>> layers;
-            layers.reserve(gates.size());
-            std::unordered_map<int,int> last_layer;
-            last_layer.reserve(this->n_qubits);
+            tamm::Scheduler sch{ec};
+            int local_result_idx = 0;
 
-            std::cout << "[RANK " << rank << "] simulation_kernel: Starting gate layering for " << gates.size() << " total gates." << std::endl;
-
-            // Gate layering logic remains the same...
-            for (const auto& g : gates) {
-                if (g.op_name == OP::C2) {
-                    int a = g.ctrl;
-                    int b = g.qubit;
-                    if (std::abs(a - b) > 1) {
-                        bool reversed = a > b;
-                        if (reversed) std::swap(a, b);
-                        for (int k = a; k < b - 1; ++k) place_c2(make_swap_sv(k, k + 1), k, k + 1, layers, last_layer);
-                        SVGate local_gate = reversed ? make_local_c2_sv(g, b, b-1) : make_local_c2_sv(g, b-1, b);
-                        place_c2(local_gate, b - 1, b, layers, last_layer);
-                        for (int k = b - 1; k > a; --k) place_c2(make_swap_sv(k - 1, k), k - 1, k, layers, last_layer);
-                    } else {
-                        place_c2(g, g.ctrl, g.qubit, layers, last_layer);
-                    }
-                } else if (g.op_name == OP::C1) {
-                    place_c1(g, layers, last_layer);
-                }
-            }
-            std::cout << "[RANK " << rank << "] simulation_kernel: Gate layering complete. Created " << layers.size() << " layers." << std::endl;
-
-            // Execute the scheduled layers
-            int layer_idx = 0;
-            for (const auto& layer : layers)
+            // Phase 2b: Iterate through the complete list of updates. All ranks do this.
+            int meta_idx = 0;
+            for (const auto& meta : all_metadata)
             {
-                if (layer.empty()) {
-                    std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " is empty, skipping." << std::endl;
-                    layer_idx++;
-                    continue;
+                if (!meta.is_valid) continue;
+
+                std::cout << "[RANK " << rank << "] apply_collective_updates: Processing update #" << meta_idx 
+                          << " for q(" << meta.q0 << ", " << meta.q1 << ") from rank " << meta.original_rank 
+                          << ". New bond dim: " << (int)meta.new_bond_dim << std::endl;
+
+                IdxType q0 = meta.q0;
+                IdxType q1 = meta.q1;
+
+                std::cout << "[RANK " << rank << "] apply_collective_updates: Scheduling deallocate for old tensors on sites " << q0 << " and " << q1 << "." << std::endl;
+                sch.deallocate(mps_tensors[q0], mps_tensors[q1]);
+
+                tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
+                bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+
+                mps_tensors[q0] = tamm::Tensor<Cplx>{bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]};
+                mps_tensors[q1] = tamm::Tensor<Cplx>{bond_tis[q0 + 1], phys_tis[q1], bond_tis[q1 + 1]};
+                mps_tensors[q0].set_dense();
+                mps_tensors[q1].set_dense();
+
+                std::cout << "[RANK " << rank << "] apply_collective_updates: Scheduling allocate for new tensors on sites " << q0 << " and " << q1 << "." << std::endl;
+                sch.allocate(mps_tensors[q0], mps_tensors[q1]);
+
+                if (pg.rank().value() == meta.original_rank) {
+                    std::cout << "[RANK " << rank << "] apply_collective_updates: This is the original rank. Scheduling scatter operation for update #" << meta_idx << "." << std::endl;
+                    const auto& result = local_results[local_result_idx++];
+                    
+                    assert(result.q0 == meta.q0 && result.q1 == meta.q1);
+
+                    sch(mps_tensors[q0]("l","p","b") = result.new_T0_local("l","p","b"));
+                    sch(mps_tensors[q1]("b","p","r") = result.new_T1_local("b","p","r"));
                 }
-                
-                std::cout << "[RANK " << rank << "] simulation_kernel: ---------- STARTING LAYER " << layer_idx << " ----------" << std::endl;
-                
-                std::vector<SVGate> batch;
-                batch.reserve(layer.size());
-                append_round_robin(layer, batch);
-                
-                std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " has " << batch.size() << " gates. Calling run_gates_parallel..." << std::endl;
-                auto local_update_results = run_gates_parallel(batch);
-                std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " returned from run_gates_parallel. This rank has " << local_update_results.size() << " local C2 results." << std::endl;
-                
-                std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << ": Calling apply_collective_updates..." << std::endl;
-                apply_collective_updates(local_update_results);
-                std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " returned from apply_collective_updates." << std::endl;
-                
-                std::cout << "[RANK " << rank << "] simulation_kernel: ---------- FINISHED LAYER " << layer_idx << " ----------" << std::endl;
-                layer_idx++;
+                meta_idx++;
             }
-            std::cout << "[RANK " << rank << "] <== Exiting simulation_kernel." << std::endl;
+
+            std::cout << "[RANK " << rank << "] apply_collective_updates: All operations for this layer have been scheduled. Calling sch.execute()..." << std::endl;
+            sch.execute(exec_hw);
+            std::cout << "[RANK " << rank << "] apply_collective_updates: sch.execute() finished." << std::endl;
+
+            std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocating local result tensors..." << std::endl;
+            for (auto& result : local_results) {
+                if(result.is_valid) {
+                    result.new_T0_local.deallocate();
+                    result.new_T1_local.deallocate();
+                }
+            }
+            std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
 
         void C1_GATE(const std::array<Cplx, 4> &U, IdxType site, tamm::Scheduler& sch_local)
