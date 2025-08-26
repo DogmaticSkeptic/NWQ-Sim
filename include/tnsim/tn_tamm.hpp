@@ -287,7 +287,7 @@ namespace NWQSim
             throw std::runtime_error("TN_TAMM::print_res_state not implemented");
         }
 
-        static inline SVGate make_swap_sv(int a, int b)
+        static SVGate make_swap_sv(int a, int b)
         {
             // CORRECTED: Call the constructor directly with the required values.
             // The constructor signature is (OP, qubit, ctrl, data).
@@ -307,7 +307,7 @@ namespace NWQSim
             return s;
         }
     
-        static inline SVGate make_local_c2_sv(const SVGate& g, int left, int right)
+        static SVGate make_local_c2_sv(const SVGate& g, int left, int right)
         {
             // CORRECTED: Use the copy constructor to create 't' as a copy of 'g'.
             SVGate t(g); 
@@ -321,7 +321,7 @@ namespace NWQSim
             return t;
         }
     
-        static inline void place_c1(const SVGate& s,
+        static void place_c1(const SVGate& s,
                                     std::vector<std::vector<SVGate>>& layers,
                                     std::unordered_map<int,int>& last_layer)
         {
@@ -332,7 +332,7 @@ namespace NWQSim
             last_layer[s.qubit] = L;
         }
     
-        static inline void place_c2(const SVGate& t, int a, int b,
+        static void place_c2(const SVGate& t, int a, int b,
                                     std::vector<std::vector<SVGate>>& layers,
                                     std::unordered_map<int,int>& last_layer)
         {
@@ -353,7 +353,7 @@ namespace NWQSim
         }
         
         // Optional but good for load balancing within a layer
-        static inline void append_round_robin(const std::vector<SVGate>& layer, std::vector<SVGate>& out)
+        static void append_round_robin(const std::vector<SVGate>& layer, std::vector<SVGate>& out)
         {
             std::vector<SVGate> singles;
             std::vector<SVGate> twos;
@@ -756,7 +756,7 @@ namespace NWQSim
             cudaFree(d_A);
         }
 
-        inline void TN_TAMM::local_svd_and_reconstruct_tensors(
+        void TN_TAMM::local_svd_and_reconstruct_tensors(
             tamm::Tensor<Cplx>& M2_local,
             tamm::Tensor<Cplx>& Ti_new_local,
             tamm::Tensor<Cplx>& Tj_new_local,
