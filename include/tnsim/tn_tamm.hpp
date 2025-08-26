@@ -592,66 +592,67 @@ namespace NWQSim
 
         void apply_collective_updates(std::vector<GateUpdateResult>& local_results)
         {
-            int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
-
-            // Phase 2a: Every rank sends its metadata and receives everyone else's.
+            DEBUG_PRINT("apply_collective_updates: Starting. Local results to process: %zu\n", local_results.size());
             auto all_metadata = allgather_metadata(local_results);
-            std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
+            DEBUG_PRINT("apply_collective_updates: Metadata gathered. Total updates to apply: %zu\n", all_metadata.size());
 
             tamm::Scheduler sch{ec};
             int local_result_idx = 0;
 
-            int meta_idx = 0;
+            // Phase 2b-1: Schedule all deallocations and allocations first.
+            for (const auto& meta : all_metadata) {
+                if (!meta.is_valid) continue;
+                sch.deallocate(mps_tensors[meta.q0], mps_tensors[meta.q1]);
+                
+                tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
+                bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+
+                mps_tensors[meta.q0] = tamm::Tensor<Cplx>{bond_tis[meta.q0], phys_tis[meta.q0], bond_tis[meta.q0 + 1]};
+                mps_tensors[meta.q1] = tamm::Tensor<Cplx>{bond_tis[meta.q0 + 1], phys_tis[meta.q1], bond_tis[meta.q1 + 1]};
+                mps_tensors[meta.q0].set_dense();
+                mps_tensors[meta.q1].set_dense();
+
+                sch.allocate(mps_tensors[meta.q0], mps_tensors[meta.q1]);
+            }
+
+            DEBUG_PRINT("apply_collective_updates: All allocs/deallocs scheduled. Executing scheduler for structural changes...\n");
+            sch.execute(exec_hw);
+            DEBUG_PRINT("apply_collective_updates: Structural changes complete.\n");
+
+            // Phase 2b-2: Now that new tensors exist, perform data transfers.
             for (const auto& meta : all_metadata)
             {
                 if (!meta.is_valid) continue;
 
-                std::cout << "[RANK " << rank << "] apply_collective_updates: Processing update #" << meta_idx 
-                          << " for q(" << meta.q0 << ", " << meta.q1 << ") from rank " << meta.original_rank 
-                          << ". New bond dim: " << (int)meta.new_bond_dim << std::endl;
-
-                IdxType q0 = meta.q0;
-                IdxType q1 = meta.q1;
-
-                std::cout << "[RANK " << rank << "] apply_collective_updates: Scheduling deallocate for old tensors on sites " << q0 << " and " << q1 << "." << std::endl;
-                sch.deallocate(mps_tensors[q0], mps_tensors[q1]);
-
-                tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
-                bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
-
-                mps_tensors[q0] = tamm::Tensor<Cplx>{bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]};
-                mps_tensors[q1] = tamm::Tensor<Cplx>{bond_tis[q0 + 1], phys_tis[q1], bond_tis[q1 + 1]};
-                mps_tensors[q0].set_dense();
-                mps_tensors[q1].set_dense();
-                
-                std::cout << "[RANK " << rank << "] apply_collective_updates: Scheduling allocate for new tensors on sites " << q0 << " and " << q1 << "." << std::endl;
-                sch.allocate(mps_tensors[q0], mps_tensors[q1]);
-
                 if (pg.rank().value() == meta.original_rank) {
-                    std::cout << "[RANK " << rank << "] apply_collective_updates: This is the original rank. Scheduling scatter operation." << std::endl;
+                    DEBUG_PRINT("apply_collective_updates: This rank (%d) is performing the data PUT for update on q(%d,%d).\n", pg.rank().value(), meta.q0, meta.q1);
                     const auto& result = local_results[local_result_idx++];
                     
-                    assert(result.q0 == meta.q0 && result.q1 == meta.q1);
+                    // Directly copy data from the local tensor's buffer to the new global tensor.
+                    // This is a blocking operation but is only done by one rank at a time for each update.
+                    std::vector<Cplx> buf0(result.new_T0_local.size());
+                    result.new_T0_local.get(*(result.new_T0_local.loop_nest().begin()), buf0);
+                    mps_tensors[meta.q0].put(*(mps_tensors[meta.q0].loop_nest().begin()), buf0);
 
-                    sch(mps_tensors[q0]("l","p","b") = result.new_T0_local("l","p","b"));
-                    sch(mps_tensors[q1]("b","p","r") = result.new_T1_local("b","p","r"));
+                    std::vector<Cplx> buf1(result.new_T1_local.size());
+                    result.new_T1_local.get(*(result.new_T1_local.loop_nest().begin()), buf1);
+                    mps_tensors[meta.q1].put(*(mps_tensors[meta.q1].loop_nest().begin()), buf1);
                 }
-                meta_idx++;
             }
 
-            std::cout << "[RANK " << rank << "] apply_collective_updates: All operations for this layer have been scheduled. Calling sch.execute()..." << std::endl;
-            sch.execute(exec_hw);
-            std::cout << "[RANK " << rank << "] apply_collective_updates: sch.execute() finished." << std::endl;
+            // A barrier is needed to ensure all PUT operations are complete before proceeding.
+            DEBUG_PRINT("apply_collective_updates: All PUTs issued. Synchronizing at barrier.\n");
+            pg.barrier();
 
-            std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocating local result tensors..." << std::endl;
+            // Phase 2d: Deallocate local temporary tensors.
+            DEBUG_PRINT("apply_collective_updates: Deallocating local result tensors...\n");
             for (auto& result : local_results) {
                 if(result.is_valid) {
                     result.new_T0_local.deallocate();
                     result.new_T1_local.deallocate();
                 }
             }
-            std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
+            DEBUG_PRINT("apply_collective_updates: Finished.\n");
         }
 
         void C1_GATE(const std::array<Cplx, 4> &U, IdxType site, tamm::Scheduler& sch_local)
