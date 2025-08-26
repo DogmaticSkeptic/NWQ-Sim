@@ -289,10 +289,12 @@ namespace NWQSim
 
         static inline SVGate make_swap_sv(int a, int b)
         {
-            SVGate s{};
-            s.op_name = OP::C2;
-            s.ctrl = a;
-            s.qubit = b;
+            // CORRECTED: Call the constructor directly with the required values.
+            // The constructor signature is (OP, qubit, ctrl, data).
+            // So we pass 'b' as the qubit and 'a' as the control.
+            SVGate s(OP::C2, b, a); 
+        
+            // The rest of the function remains the same.
             static const ValType real[16] = {
                 1,0,0,0,
                 0,0,1,0,
@@ -307,12 +309,15 @@ namespace NWQSim
     
         static inline SVGate make_local_c2_sv(const SVGate& g, int left, int right)
         {
-            SVGate t{};
-            t.op_name = OP::C2;
+            // CORRECTED: Use the copy constructor to create 't' as a copy of 'g'.
+            SVGate t(g); 
+        
+            // Now, simply modify the fields that need to be different.
             t.ctrl = left;
             t.qubit = right;
-            memcpy(t.gm_real, g.gm_real, 16 * sizeof(ValType));
-            memcpy(t.gm_imag, g.gm_imag, 16 * sizeof(ValType));
+            
+            // The gm_real and gm_imag are already correct because they were copied from g.
+            // No memcpy is needed here.
             return t;
         }
     
