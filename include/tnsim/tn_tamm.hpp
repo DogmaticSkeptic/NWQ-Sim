@@ -62,6 +62,7 @@ namespace NWQSim
         IdxType new_bond_dim;
         std::vector<Cplx> new_T0_data; // Raw data, not a TAMM tensor
         std::vector<Cplx> new_T1_data; // Raw data, not a TAMM tensor
+        int original_rank;
     };
 
     struct GateUpdateResult {
