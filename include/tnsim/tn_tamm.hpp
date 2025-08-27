@@ -615,9 +615,18 @@ namespace NWQSim
         
                 // ONLY the rank that holds the new data schedules the put operation.
                 if (rank == meta.original_rank) {
-                    const auto& result_data = local_results[local_result_idx++];
-                    mps_tensors[q0].put(*(mps_tensors[q0].loop_nest().begin()), result_data.new_T0_data);
-                    mps_tensors[q1].put(*(mps_tensors[q1].loop_nest().begin()), result_data.new_T1_data);
+                    // FIX: Changed 'const auto&' to 'auto&' to get a non-const reference.
+                    auto& result_data = local_results[local_result_idx++];
+        
+                    // Sanity check
+                    assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
+        
+                    // FIX: Explicitly create a non-const span from the vector's data.
+                    tamm::span<Cplx> t0_span{result_data.new_T0_data};
+                    tamm::span<Cplx> t1_span{result_data.new_T1_data};
+        
+                    mps_tensors[q0].put(*(mps_tensors[q0].loop_nest().begin()), t0_span);
+                    mps_tensors[q1].put(*(mps_tensors[q1].loop_nest().begin()), t1_span);
                 }
             }
         
@@ -626,7 +635,6 @@ namespace NWQSim
             sch_global.execute(exec_hw);
             std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
-
        void C1_GATE(const std::array<Cplx, 4> &U, IdxType site, tamm::Scheduler& sch_global)
         {
             // Use the execution context from the provided global scheduler
