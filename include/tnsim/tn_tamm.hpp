@@ -56,6 +56,14 @@ namespace NWQSim
 
     class TN_TAMM;
 
+    struct LocalGateResult {
+        bool is_valid = false;
+        IdxType q0, q1;
+        IdxType new_bond_dim;
+        std::vector<Cplx> new_T0_data; // Raw data, not a TAMM tensor
+        std::vector<Cplx> new_T1_data; // Raw data, not a TAMM tensor
+    };
+
     struct GateUpdateResult {
         bool is_valid = false;
         IdxType q0, q1;
@@ -401,16 +409,14 @@ namespace NWQSim
 
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
-            // Get the rank of the current process for printing
             int rank = pg.rank().value();
-
             std::cout << "[RANK " << rank << "] ==> Entering simulation_kernel." << std::endl;
-
+        
             std::vector<std::vector<SVGate>> layers;
             layers.reserve(gates.size());
             std::unordered_map<int,int> last_layer;
             last_layer.reserve(this->n_qubits);
-
+        
             std::cout << "[RANK " << rank << "] simulation_kernel: Starting gate layering for " << gates.size() << " gates." << std::endl;
             // Gate layering logic remains the same...
             for (const auto& g : gates) {
@@ -432,106 +438,93 @@ namespace NWQSim
                 }
             }
             std::cout << "[RANK " << rank << "] simulation_kernel: Gate layering complete. Created " << layers.size() << " layers." << std::endl;
-
-
+        
+        
             // Execute the scheduled layers
             int layer_idx = 0;
             for (const auto& layer : layers)
             {
                 if (layer.empty()) {
-                    std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " is empty, skipping." << std::endl;
                     layer_idx++;
                     continue;
                 }
-
+        
                 std::cout << "[RANK " << rank << "] simulation_kernel: ---------- STARTING LAYER " << layer_idx << " ----------" << std::endl;
-
+        
                 std::vector<SVGate> batch;
                 batch.reserve(layer.size());
                 append_round_robin(layer, batch);
-
+        
+                // STAGE 1: Each rank computes its assigned gates and returns the raw data.
                 std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " has " << batch.size() << " gates. Calling run_gates_parallel..." << std::endl;
                 auto local_update_results = run_gates_parallel(batch);
                 std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " returned from run_gates_parallel. This rank has " << local_update_results.size() << " local C2 results." << std::endl;
-
-
+        
+                // Ensure all local computations are finished before the collective update.
+                pg.barrier();
+        
+                // STAGE 2: All ranks participate in updating the global MPS state.
                 std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << ": Calling apply_collective_updates..." << std::endl;
                 apply_collective_updates(local_update_results);
                 std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " returned from apply_collective_updates." << std::endl;
-
+        
+                // Ensure the global MPS is in a consistent state before starting the next layer.
+                pg.barrier();
+        
                 std::cout << "[RANK " << rank << "] simulation_kernel: ---------- FINISHED LAYER " << layer_idx << " ----------" << std::endl;
                 layer_idx++;
             }
             std::cout << "[RANK " << rank << "] <== Exiting simulation_kernel." << std::endl;
         }
 
-        std::vector<GateUpdateResult> run_gates_parallel(const std::vector<SVGate>& batch)
+        std::vector<LocalGateResult> run_gates_parallel(const std::vector<SVGate>& batch)
         {
             int rank = pg.rank().value();
             std::cout << "[RANK " << rank << "] >> Entering run_gates_parallel" << std::endl;
-
-            std::cout << "[RANK " << rank << "] run_gates_parallel: Creating self ProcGroup..." << std::endl;
-            tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
-
-            std::cout << "[RANK " << rank << "] run_gates_parallel: Allocating atomic counter..." << std::endl;
+        
             tamm::AtomicCounterGA gate_counter(pg, 1);
             gate_counter.allocate(0);
-
-            std::cout << "[RANK " << rank << "] run_gates_parallel: Synchronizing at first barrier..." << std::endl;
-            pg.barrier();
-            std::cout << "[RANK " << rank << "] run_gates_parallel: Barrier passed. Entering gate processing loop." << std::endl;
-
-            std::vector<GateUpdateResult> local_results;
-
+            pg.barrier(); // Ensure atomic counter is ready for all ranks
+        
+            std::vector<LocalGateResult> local_results;
+        
             while (true)
             {
                 long long gate_idx = gate_counter.fetch_add(0, 1);
-
+        
                 if (gate_idx >= static_cast<long long>(batch.size())) {
-                    std::cout << "[RANK " << rank << "] run_gates_parallel: Fetched gate index " << gate_idx << " which is >= batch size " << batch.size() << ". This rank is done." << std::endl;
                     break;
                 }
-
-                std::cout << "[RANK " << rank << "] run_gates_parallel: Fetched gate index " << gate_idx << "." << std::endl;
-
+        
                 const SVGate& g = batch[gate_idx];
-                // Use a LOCAL memory manager for the local EC
-                tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
-                tamm::Scheduler sch_local{ec_local};
-
+                
                 if (g.op_name == OP::C1) {
-                    std::cout << "[RANK " << rank << "] run_gates_parallel: Gate " << gate_idx << " is a C1 gate on qubit " << g.qubit << ". Calling C1_GATE." << std::endl;
+                    // C1 gates are simpler as they modify a single tensor.
+                    // This can be done directly on the global tensor.
+                    tamm::Scheduler sch_global{ec};
                     std::array<Cplx, 4> U;
                     for (int i=0; i<4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
-                    C1_GATE(U, g.qubit, sch_local);
-                    std::cout << "[RANK " << rank << "] run_gates_parallel: Returned from C1_GATE for gate " << gate_idx << "." << std::endl;
+                    C1_GATE(U, g.qubit, sch_global); // This needs to use the global scheduler now
                 } else if (g.op_name == OP::C2) {
-                    std::cout << "[RANK " << rank << "] run_gates_parallel: Gate " << gate_idx << " is a C2 gate on qubits (" << g.ctrl << ", " << g.qubit << "). Calling C2_GATE_L." << std::endl;
                     std::array<Cplx, 16> U4;
                     for (int i=0; i<16; ++i) U4[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
-                    // Pass the GLOBAL execution context (this->ec) to the C2 gate function
-                    local_results.push_back(C2_GATE_L(U4, g.ctrl, g.qubit, sch_local, this->ec));
-                    std::cout << "[RANK " << rank << "] run_gates_parallel: Returned from C2_GATE_L for gate " << gate_idx << "." << std::endl;
+                    local_results.push_back(C2_GATE_COMPUTE(U4, g.ctrl, g.qubit));
                 }
             }
-
-            std::cout << "[RANK " << rank << "] run_gates_parallel: Exited loop. Synchronizing at final barrier." << std::endl;
-            pg.barrier();
-
-            std::cout << "[RANK " << rank << "] run_gates_parallel: Deallocating atomic counter." << std::endl;
+        
+            pg.barrier(); // All ranks finish their local computations
             gate_counter.deallocate();
-
-            std::cout << "[RANK " << rank << "] run_gates_parallel: Destroying self ProcGroup." << std::endl;
-            self_pg.destroy_coll();
-
+        
             std::cout << "[RANK " << rank << "] << Exiting run_gates_parallel. Returning " << local_results.size() << " local results." << std::endl;
             return local_results;
         }
 
-        std::vector<GateUpdateMetadata> allgather_metadata(const std::vector<GateUpdateResult>& local_results) {
+        std::vector<GateUpdateMetadata> allgather_metadata(const std::vector<LocalGateResult>& local_results) 
+        {
             int rank = pg.rank().value();
             std::cout << "[RANK " << rank << "] >> Entering allgather_metadata. Processing " << local_results.size() << " local results." << std::endl;
-
+        
+            // Create metadata from the raw local results
             std::vector<GateUpdateMetadata> local_metadata;
             local_metadata.reserve(local_results.size());
             for(const auto& res : local_results) {
@@ -540,27 +533,19 @@ namespace NWQSim
                         true,
                         res.q0,
                         res.q1,
-                        (IdxType)res.new_T0_local.tiled_index_spaces()[2].index_space().num_indices(),
-                        (int)pg.rank().value()
+                        res.new_bond_dim,
+                        res.original_rank
                     });
                 }
             }
             std::cout << "[RANK " << rank << "] allgather_metadata: Created " << local_metadata.size() << " local metadata entries." << std::endl;
-
+        
+            // The rest of the function is a collective communication and remains the same.
             int local_size_bytes = local_metadata.size() * sizeof(GateUpdateMetadata);
             std::vector<int> all_sizes_bytes(pg.size().value());
-
-            std::cout << "[RANK " << rank << "] allgather_metadata: Calling allgather for sizes. This rank is sending size " << local_size_bytes << " bytes." << std::endl;
+        
             pg.allgather(&local_size_bytes, 1, all_sizes_bytes.data(), 1);
-
-            if (rank == 0) {
-                std::cout << "[RANK 0] allgather_metadata: Received sizes from all ranks (bytes): [";
-                for(size_t i = 0; i < all_sizes_bytes.size(); ++i) {
-                    std::cout << all_sizes_bytes[i] << (i == all_sizes_bytes.size() - 1 ? "" : ", ");
-                }
-                std::cout << "]" << std::endl;
-            }
-
+        
             std::vector<int> displacements_bytes(pg.size().value(), 0);
             int total_size_bytes = 0;
             for (size_t i = 0; i < all_sizes_bytes.size(); ++i) {
@@ -569,12 +554,10 @@ namespace NWQSim
                 }
                 total_size_bytes += all_sizes_bytes[i];
             }
-            std::cout << "[RANK " << rank << "] allgather_metadata: Calculated displacements. Total metadata size: " << total_size_bytes << " bytes." << std::endl;
-
+            
             std::vector<GateUpdateMetadata> all_metadata;
             if (total_size_bytes > 0) {
                 all_metadata.resize(total_size_bytes / sizeof(GateUpdateMetadata));
-                std::cout << "[RANK " << rank << "] allgather_metadata: Calling MPI_Allgatherv..." << std::endl;
                 MPI_Allgatherv(local_metadata.data(),
                                local_size_bytes,
                                MPI_BYTE,
@@ -584,148 +567,136 @@ namespace NWQSim
                                MPI_BYTE,
                                pg.comm());
             } else {
-                 std::cout << "[RANK " << rank << "] allgather_metadata: No metadata to gather, skipping MPI_Allgatherv." << std::endl;
+                 std::cout << "[RANK " << rank << "] allgather_metadata: No metadata to gather." << std::endl;
             }
-
+        
             std::cout << "[RANK " << rank << "] << Exiting allgather_metadata. Total metadata entries gathered: " << all_metadata.size() << std::endl;
             return all_metadata;
         }
 
-        void apply_collective_updates(std::vector<GateUpdateResult>& local_results)
+        void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
             std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
-
+        
+            // 1. Gather metadata from all ranks. This is a collective call.
             auto all_metadata = allgather_metadata(local_results);
             std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
-
-            tamm::Scheduler sch{ec};
+        
+            // 2. Create a single global scheduler for this layer's updates.
+            tamm::Scheduler sch_global{ec};
             int local_result_idx = 0;
-
+        
+            // 3. All ranks loop through the metadata and schedule collective operations.
             for (const auto& meta : all_metadata)
             {
                 if (!meta.is_valid) continue;
-
-                std::cout << "[RANK " << rank << "] apply_collective_updates: Processing update #" << local_result_idx
-                          << " for q(" << meta.q0 << ", " << meta.q1 << ") from rank " << meta.original_rank
-                          << ". New bond dim: " << (int)meta.new_bond_dim << std::endl;
-
+                
                 IdxType q0 = meta.q0;
                 IdxType q1 = meta.q1;
-
-                std::cout << "[RANK " << rank << "] apply_collective_updates: Scheduling deallocate for old tensors on sites " << q0 << " and " << q1 << "." << std::endl;
-                sch.deallocate(mps_tensors[q0], mps_tensors[q1]);
-
+        
+                // ALL ranks schedule the deallocation of old tensors.
+                sch_global.deallocate(mps_tensors[q0], mps_tensors[q1]);
+        
+                // ALL ranks update their local description of the MPS structure.
+                bond_dims[q0 + 1] = meta.new_bond_dim;
                 tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
                 bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
-
+        
+                // ALL ranks create new tensor handles with the updated structure.
                 mps_tensors[q0] = tamm::Tensor<Cplx>{bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]};
                 mps_tensors[q1] = tamm::Tensor<Cplx>{bond_tis[q0 + 1], phys_tis[q1], bond_tis[q1 + 1]};
                 mps_tensors[q0].set_dense();
                 mps_tensors[q1].set_dense();
-
-                std::cout << "[RANK " << rank << "] apply_collective_updates: Scheduling allocate for new tensors on sites " << q0 << " and " << q1 << "." << std::endl;
-                sch.allocate(mps_tensors[q0], mps_tensors[q1]);
-
-                if (pg.rank().value() == meta.original_rank) {
-                    std::cout << "[RANK " << rank << "] apply_collective_updates: This is the original rank. Scheduling scatter operation for update #" << local_result_idx << "." << std::endl;
-                    const auto& result = local_results[local_result_idx++];
-
-                    assert(result.q0 == meta.q0 && result.q1 == meta.q1);
-
-                    sch(mps_tensors[q0]("l","p","b") = result.new_T0_local("l","p","b"));
-                    sch(mps_tensors[q1]("b","p","r") = result.new_T1_local("b","p","r"));
+        
+                // ALL ranks schedule the allocation of the new tensors.
+                sch_global.allocate(mps_tensors[q0], mps_tensors[q1]);
+        
+                // ONLY the rank that holds the new data schedules the put operation.
+                if (rank == meta.original_rank) {
+                    const auto& result_data = local_results[local_result_idx++];
+                    mps_tensors[q0].put(*(mps_tensors[q0].loop_nest().begin()), result_data.new_T0_data);
+                    mps_tensors[q1].put(*(mps_tensors[q1].loop_nest().begin()), result_data.new_T1_data);
                 }
             }
-
+        
+            // 4. ALL ranks execute the scheduled collective operations.
             std::cout << "[RANK " << rank << "] apply_collective_updates: All operations for this layer have been scheduled. Calling sch.execute()..." << std::endl;
-            sch.execute(exec_hw);
-            std::cout << "[RANK " << rank << "] apply_collective_updates: sch.execute() finished." << std::endl;
-
-            // This cleanup must be collective, as all ranks have a valid tensor handle
-            // in their local_results vector if they were the originator.
-            // The tensors themselves are globally allocated.
-            if (!local_results.empty()) {
-                std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocating " << local_results.size() << " local result tensors..." << std::endl;
-                tamm::Scheduler sch_cleanup{ec}; // Use the global scheduler for cleanup
-                for (auto& result : local_results) {
-                    if(result.is_valid) {
-                        sch_cleanup.deallocate(result.new_T0_local, result.new_T1_local);
-                    }
-                }
-                sch_cleanup.execute();
-            }
+            sch_global.execute(exec_hw);
             std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
 
-        void C1_GATE(const std::array<Cplx, 4> &U, IdxType site, tamm::Scheduler& sch_local)
+       void C1_GATE(const std::array<Cplx, 4> &U, IdxType site, tamm::Scheduler& sch_global)
         {
-            auto& ec_local = sch_local.ec();
+            // Use the execution context from the provided global scheduler
+            auto& ec_global = sch_global.ec();
+        
+            // The gate matrix G can be a local tensor as it's small and temporary.
+            // Create a temporary local context for it.
+            tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
+            tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
         
             tamm::Tensor<Cplx> G({phys_tis[site], phys_tis[site]});
             G.set_dense();
             G.allocate(&ec_local);
         
+            // Fill the gate tensor with values from U
             auto fill_g = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
                 auto offsets = G.block_offsets(bid);
-                auto pout = offsets[0];
-                auto pin = offsets[1];
-                buf[0] = U[pout * 2 + pin]; 
+                int pout = offsets[0];
+                int pin = offsets[1];
+                buf[0] = U[pout * 2 + pin];
             };
             tamm::update_tensor(G, fill_g);
         
-            tamm::Tensor<Cplx> Tnew_local({bond_tis[site], phys_tis[site], bond_tis[site + 1]});
-            Tnew_local.set_dense();
-            Tnew_local.allocate(&ec_local);
+            // Create a temporary GLOBAL tensor to hold the result
+            tamm::Tensor<Cplx> Tnew_global({bond_tis[site], phys_tis[site], bond_tis[site + 1]});
+            Tnew_global.set_dense();
         
-            sch_local(Tnew_local("l","p'","r") = G("p'","p") * mps_tensors[site]("l","p","r")).execute();
+            // Schedule the allocation, contraction, copy-back, and deallocation on the GLOBAL scheduler
+            sch_global
+                .allocate(Tnew_global)
+                (Tnew_global("l","p'","r") = G("p'","p") * mps_tensors[site]("l","p","r"))
+                (mps_tensors[site]("l","p","r") = Tnew_global("l","p","r"))
+                .deallocate(Tnew_global);
+                // Note: G is stack-allocated in ec_local and will be cleaned up
+                // when C1_GATE finishes. We don't need to deallocate it in the scheduler.
+                // And we destroy the self_pg at the end.
         
-            sch_local(mps_tensors[site]("l","p","r") = Tnew_local("l","p","r")).execute();
-        
-            G.deallocate();
-            Tnew_local.deallocate();
-        }
-        
-        GateUpdateResult C2_GATE_L(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1, tamm::Scheduler& sch_local, tamm::ExecutionContext& ec_global)
+            self_pg.destroy_coll();
+        } 
+        LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
-            int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] >> C2_GATE_L: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
-
-            auto& ec_local = sch_local.ec();
-            tamm::Scheduler sch_global{ec_global}; // Create a scheduler for the global context
-
-            // GATHER STEP: Copy distributed tensor blocks to local tensors.
-            // Using direct get() calls instead of scheduling to avoid deadlocks.
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Gathering tensors T(" << q0 << ") and T(" << q1 << ") into local copies." << std::endl;
+            // 1. Create a truly local execution context for this one-shot computation.
+            tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
+            tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
+            tamm::Scheduler sch_local{ec_local};
+        
+            // 2. Create LOCAL tensors for inputs and intermediates.
             tamm::Tensor<Cplx> T0_local({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
             tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
-            T0_local.set_dense();
-            T1_local.set_dense();
-            T0_local.allocate(&ec_local);
-            T1_local.allocate(&ec_local);
-            
+            T0_local.set_dense(); T1_local.set_dense();
+            sch_local.allocate(T0_local, T1_local).execute();
+        
+            // 3. GET data from the global tensors into local std::vectors, then PUT to local tensors.
+            // This is the only communication with the global state needed for input.
             std::vector<Cplx> t0_buf(T0_local.size());
             mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
             T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
-
+        
             std::vector<Cplx> t1_buf(T1_local.size());
             mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
             T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Gather complete. T0_local dims: ("
-                      << bond_dims[q0] << "," << phys_dims[q0] << "," << bond_dims[q0+1] << "), "
-                      << "T1_local dims: (" << bond_dims[q1] << "," << phys_dims[q1] << "," << bond_dims[q1+1] << ")." << std::endl;
-
-            // LOCAL COMPUTE STEP (uses local context for intermediates)
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Fusing local tensors into M_local." << std::endl;
-            tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
-            M_local.set_dense(); M_local.allocate(&ec_local);
-            sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute();
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Fusion complete. M_local dims: ("
-                      << bond_dims[q0] << "," << phys_dims[q0] << "," << phys_dims[q1] << "," << bond_dims[q1+1] << ")." << std::endl;
             
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Creating 4x4 gate matrix G4_local." << std::endl;
+            // 4. Perform local computations using the local scheduler.
+            tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
-            G4_local.set_dense(); G4_local.allocate(&ec_local);
+            tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+            M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
+            sch_local.allocate(M_local, G4_local, M2_local).execute();
+        
+            sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute();
+            
             auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
                 auto offsets = G4_local.block_offsets(bid);
                 int p0p = offsets[0], p1p = offsets[1], p0 = offsets[2], p1 = offsets[3];
@@ -733,34 +704,27 @@ namespace NWQSim
             };
             tamm::update_tensor(G4_local, fill_g4);
             
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Applying gate matrix to M_local to get M2_local." << std::endl;
-            tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
-            M2_local.set_dense(); M2_local.allocate(&ec_local);
             sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute();
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Gate application complete." << std::endl;
+        
+            // 5. Perform SVD on the local M2_local tensor.
+            // This function now returns data into std::vectors, not pre-allocated global tensors.
+            std::vector<Cplx> Ti_new_data, Tj_new_data;
+            IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
             
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Deallocating local intermediates T0, T1, M, G4." << std::endl;
-            sch_local.deallocate(T0_local, T1_local, M_local, G4_local).execute();
-            
-            // RESULT TENSOR PREPARATION
-            tamm::Tensor<Cplx> Ti_new_global, Tj_new_global;
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Calling SVD and reconstruction..." << std::endl;
-            local_svd_and_reconstruct_tensors(M2_local, Ti_new_global, Tj_new_global, q0, q1, sch_local, ec_global);
-            std::cout << "[RANK " << rank << "] C2_GATE_L: SVD and reconstruction finished." << std::endl;
-            
-            auto new_bond_dim = Ti_new_global.tiled_index_spaces()[2].index_space().num_indices();
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Packaging result. New bond dimension is " << new_bond_dim << "." << std::endl;
-            GateUpdateResult result;
+            // 6. Package the results into the POD struct.
+            LocalGateResult result;
             result.is_valid = true;
             result.q0 = q0;
             result.q1 = q1;
-            result.new_T0_local = std::move(Ti_new_global);
-            result.new_T1_local = std::move(Tj_new_global);
-            
-            std::cout << "[RANK " << rank << "] C2_GATE_L: Deallocating final local intermediate M2." << std::endl;
-            sch_local.deallocate(M2_local).execute();
-    
-            std::cout << "[RANK " << rank << "] << C2_GATE_L: Exiting for qubits (" << q0 << ", " << q1 << ")." << std::endl;
+            result.new_bond_dim = new_bond_dim;
+            result.new_T0_data = std::move(Ti_new_data);
+            result.new_T1_data = std::move(Tj_new_data);
+            result.original_rank = pg.rank().value();
+        
+            // 7. Clean up all temporary local resources.
+            sch_local.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute();
+            self_pg.destroy_coll();
+        
             return result;
         }
 
@@ -855,30 +819,27 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] <--- gpu_svd_jacobi: Exiting." << std::endl;
         }
 
-        void local_svd_and_reconstruct_tensors(
+        IdxType local_svd_and_reconstruct_data(
             tamm::Tensor<Cplx>& M2_local,
-            tamm::Tensor<Cplx>& Ti_new,
-            tamm::Tensor<Cplx>& Tj_new,
-            IdxType q0, IdxType q1,
-            tamm::Scheduler& sch_local,
-            tamm::ExecutionContext& ec_global)
+            std::vector<Cplx>& Ti_new_data,
+            std::vector<Cplx>& Tj_new_data,
+            IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_tensors: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
-
-            auto& ec_local = sch_local.ec();
+            std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
+        
             const IdxType phys_dim = 2;
-
-            IdxType Dl = bond_dims[q0];
-            IdxType Dr = bond_dims[q1 + 1];
+            IdxType Dl = M2_local.tiled_index_spaces()[0].index_space().num_indices();
+            IdxType Dr = M2_local.tiled_index_spaces()[3].index_space().num_indices();
+        
             int m = Dl * phys_dim;
             int n = phys_dim * Dr;
+        
+            // Reshape the row-major TAMM tensor data into a column-major matrix for cuSOLVER.
             std::vector<Cplx> M2_col_major(m * n);
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Reshaping M2_local tensor into column-major matrix of size (" << m << ", " << n << ")." << std::endl;
-
             std::vector<Cplx> M2_hostbuf(M2_local.size());
             M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
-
+        
             size_t c = 0;
             for (size_t l = 0; l < Dl; ++l)
             for (size_t p0 = 0; p0 < phys_dim; ++p0)
@@ -889,14 +850,14 @@ namespace NWQSim
                 size_t col = p1 * Dr + r;
                 M2_col_major[row + col * m] = M2_hostbuf[c];
             }
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Reshape complete." << std::endl;
-
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Reshape complete." << std::endl;
+        
+            // Perform the SVD on the GPU.
             std::vector<double> S;
             std::vector<Cplx> U_row, VT_row;
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Calling gpu_svd_jacobi..." << std::endl;
             gpu_svd_jacobi(M2_col_major.data(), m, n, S, U_row, VT_row);
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Returned from gpu_svd_jacobi." << std::endl;
-
+        
+            // Truncate based on singular value cutoff and max bond dimension.
             std::vector<IdxType> keep;
             keep.reserve(S.size());
             for (size_t i = 0; i < S.size(); ++i) {
@@ -906,47 +867,32 @@ namespace NWQSim
             }
             IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
             if (chi == 0) {
-                chi = 1;
+                chi = 1; // Prevent bond dimension from becoming zero.
             }
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Truncation complete. Kept " << keep.size() << " singular values. New bond dimension (chi): " << chi << "." << std::endl;
-
-            bond_dims[q0 + 1] = chi;
-            tamm::TiledIndexSpace new_bond_tis{tamm::IndexSpace{tamm::range(chi)}, static_cast<tamm::Tile>(block_size)};
-
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Reconstructing new tensors in GLOBAL context." << std::endl;
-            Ti_new = tamm::Tensor<Cplx>({ bond_tis[q0], phys_tis[q0], new_bond_tis });
-            Ti_new.set_dense();
-            Ti_new.allocate(&ec_global);
-
-            Tj_new = tamm::Tensor<Cplx>({ new_bond_tis, phys_tis[q1], bond_tis[q1 + 1] });
-            Tj_new.set_dense();
-            Tj_new.allocate(&ec_global);
-            
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Populating Ti_new (left tensor)." << std::endl;
-            std::vector<Cplx> Ti_hostbuf(Ti_new.size());
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
+        
+            // Populate the output vectors with the data for the new tensors.
+            Ti_new_data.resize(Dl * phys_dim * chi);
             c = 0;
             for (size_t l = 0; l < Dl; ++l)
             for (size_t p0 = 0; p0 < phys_dim; ++p0)
             for (size_t b = 0; b < chi; ++b, ++c)
             {
-                Ti_hostbuf[c] = U_row[(l * phys_dim + p0) * S.size() + keep[b]];
+                Ti_new_data[c] = U_row[(l * phys_dim + p0) * S.size() + keep[b]];
             }
-            Ti_new.put(*(Ti_new.loop_nest().begin()), Ti_hostbuf);
-
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Populating Tj_new (right tensor)." << std::endl;
-            std::vector<Cplx> Tj_hostbuf(Tj_new.size());
+        
+            Tj_new_data.resize(chi * phys_dim * Dr);
             c = 0;
             for (size_t b = 0; b < chi; ++b)
             for (size_t p1 = 0; p1 < phys_dim; ++p1)
             for (size_t r = 0; r < Dr; ++r, ++c)
             {
-                Tj_hostbuf[c] = Cplx(S[keep[b]], 0.0) * VT_row[keep[b] * n + (p1 * Dr + r)];
+                Tj_new_data[c] = Cplx(S[keep[b]], 0.0) * VT_row[keep[b] * n + (p1 * Dr + r)];
             }
-            Tj_new.put(*(Tj_new.loop_nest().begin()), Tj_hostbuf);
-
-            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_tensors: Exiting." << std::endl;
+        
+            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data: Exiting." << std::endl;
+            return chi;
         }
-
         void right_canonicalize(std::vector<tamm::Tensor<Cplx>> &MPS)
         {
             // canonicalize MPS from right end toward left
