@@ -688,10 +688,15 @@ namespace NWQSim
         
         GateUpdateResult C2_GATE_L(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1, tamm::Scheduler& sch_local, tamm::ExecutionContext& ec_global)
         {
+            int rank = pg.rank().value();
+            std::cout << "[RANK " << rank << "] >> C2_GATE_L: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
+
             auto& ec_local = sch_local.ec();
             tamm::Scheduler sch_global{ec_global}; // Create a scheduler for the global context
 
-            // GATHER STEP (use direct get/put, bypassing scheduler to avoid deadlock)
+            // GATHER STEP: Copy distributed tensor blocks to local tensors.
+            // Using direct get() calls instead of scheduling to avoid deadlocks.
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Gathering tensors T(" << q0 << ") and T(" << q1 << ") into local copies." << std::endl;
             tamm::Tensor<Cplx> T0_local({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
             tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
             T0_local.set_dense();
@@ -706,12 +711,19 @@ namespace NWQSim
             std::vector<Cplx> t1_buf(T1_local.size());
             mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
             T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Gather complete. T0_local dims: ("
+                      << bond_dims[q0] << "," << phys_dims[q0] << "," << bond_dims[q0+1] << "), "
+                      << "T1_local dims: (" << bond_dims[q1] << "," << phys_dims[q1] << "," << bond_dims[q1+1] << ")." << std::endl;
 
             // LOCAL COMPUTE STEP (uses local context for intermediates)
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Fusing local tensors into M_local." << std::endl;
             tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M_local.set_dense(); M_local.allocate(&ec_local);
             sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute();
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Fusion complete. M_local dims: ("
+                      << bond_dims[q0] << "," << phys_dims[q0] << "," << phys_dims[q1] << "," << bond_dims[q1+1] << ")." << std::endl;
             
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Creating 4x4 gate matrix G4_local." << std::endl;
             tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
             G4_local.set_dense(); G4_local.allocate(&ec_local);
             auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
@@ -721,15 +733,23 @@ namespace NWQSim
             };
             tamm::update_tensor(G4_local, fill_g4);
             
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Applying gate matrix to M_local to get M2_local." << std::endl;
             tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M2_local.set_dense(); M2_local.allocate(&ec_local);
             sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute();
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Gate application complete." << std::endl;
             
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Deallocating local intermediates T0, T1, M, G4." << std::endl;
             sch_local.deallocate(T0_local, T1_local, M_local, G4_local).execute();
             
+            // RESULT TENSOR PREPARATION
             tamm::Tensor<Cplx> Ti_new_global, Tj_new_global;
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Calling SVD and reconstruction..." << std::endl;
             local_svd_and_reconstruct_tensors(M2_local, Ti_new_global, Tj_new_global, q0, q1, sch_local, ec_global);
+            std::cout << "[RANK " << rank << "] C2_GATE_L: SVD and reconstruction finished." << std::endl;
             
+            auto new_bond_dim = Ti_new_global.tiled_index_spaces()[2].index_space().num_indices();
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Packaging result. New bond dimension is " << new_bond_dim << "." << std::endl;
             GateUpdateResult result;
             result.is_valid = true;
             result.q0 = q0;
@@ -737,8 +757,10 @@ namespace NWQSim
             result.new_T0_local = std::move(Ti_new_global);
             result.new_T1_local = std::move(Tj_new_global);
             
+            std::cout << "[RANK " << rank << "] C2_GATE_L: Deallocating final local intermediate M2." << std::endl;
             sch_local.deallocate(M2_local).execute();
     
+            std::cout << "[RANK " << rank << "] << C2_GATE_L: Exiting for qubits (" << q0 << ", " << q1 << ")." << std::endl;
             return result;
         }
 
