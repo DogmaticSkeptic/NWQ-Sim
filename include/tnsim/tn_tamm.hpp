@@ -770,72 +770,89 @@ namespace NWQSim
             std::vector<Cplx>& U_row,
             std::vector<Cplx>& VT_row)
         {
+            int rank = pg.rank().value();
+            std::cout << "[RANK " << rank << "] ---> gpu_svd_jacobi: Entered. Matrix dimensions (m, n): (" << m << ", " << n << ")." << std::endl;
+
             cusolverDnXgesvdjSetTolerance(cu_ctx_.jp, 1e-14);
             cusolverDnXgesvdjSetMaxSweeps(cu_ctx_.jp, 100);
-        
+
             int lda = m;
             int ldu = m;
             int ldv = n;
-            int econ = 1;
+            int econ = 1; // Economy SVD
             int k = std::min(m, n);
-        
+
             cuDoubleComplex* d_A = nullptr;
             double* d_S = nullptr;
             cuDoubleComplex* d_U = nullptr;
             cuDoubleComplex* d_V = nullptr;
             int* d_info = nullptr;
-        
+
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Allocating GPU memory for A, S, U, V, info." << std::endl;
             cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * (size_t)lda * (size_t)n);
             cudaMalloc((void**)&d_S, sizeof(double) * (size_t)k);
             cudaMalloc((void**)&d_U, sizeof(cuDoubleComplex) * (size_t)ldu * (size_t)k);
             cudaMalloc((void**)&d_V, sizeof(cuDoubleComplex) * (size_t)ldv * (size_t)k);
             cudaMalloc((void**)&d_info, sizeof(int));
-        
+
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Copying host matrix A to device." << std::endl;
             cudaMemcpyAsync(d_A, reinterpret_cast<const cuDoubleComplex*>(A_h),
                             sizeof(cuDoubleComplex) * (size_t)lda * (size_t)n,
                             cudaMemcpyHostToDevice, cu_ctx_.stream);
-        
+
             int lwork_req = 0;
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Querying buffer size for Zgesvdj." << std::endl;
             cusolverDnZgesvdj_bufferSize(cu_ctx_.solver, CUSOLVER_EIG_MODE_VECTOR, econ,
                                          m, n, d_A, lda, d_S, d_U, ldu, d_V, ldv,
                                          &lwork_req, cu_ctx_.jp);
-        
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Required buffer size (lwork_req): " << lwork_req << "." << std::endl;
+
             if (lwork_req > cu_ctx_.lwork_jac) {
+                std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Reallocating GPU workspace from " << cu_ctx_.lwork_jac << " to " << lwork_req << "." << std::endl;
                 if (cu_ctx_.d_work_jac) cudaFree(cu_ctx_.d_work_jac);
                 cu_ctx_.lwork_jac = lwork_req;
                 cudaMalloc((void**)&cu_ctx_.d_work_jac, sizeof(cuDoubleComplex) * (size_t)cu_ctx_.lwork_jac);
             }
-        
+
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Calling cusolverDnZgesvdj to perform SVD on GPU..." << std::endl;
             cusolverDnZgesvdj(cu_ctx_.solver, CUSOLVER_EIG_MODE_VECTOR, econ,
                               m, n, d_A, lda, d_S, d_U, ldu, d_V, ldv,
                               reinterpret_cast<cuDoubleComplex*>(cu_ctx_.d_work_jac),
                               cu_ctx_.lwork_jac, d_info, cu_ctx_.jp);
-        
+
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Synchronizing CUDA stream..." << std::endl;
             cudaStreamSynchronize(cu_ctx_.stream);
-        
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Stream synchronized. GPU computation finished." << std::endl;
+
             S.resize((size_t)k);
             std::vector<Cplx> U_col((size_t)ldu * (size_t)k);
             std::vector<Cplx> V_col((size_t)ldv * (size_t)k);
-        
+
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Copying results S, U, V from device to host." << std::endl;
             cudaMemcpy(S.data(), d_S, sizeof(double) * (size_t)k, cudaMemcpyDeviceToHost);
             cudaMemcpy(U_col.data(), d_U, sizeof(Cplx) * (size_t)ldu * (size_t)k, cudaMemcpyDeviceToHost);
             cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * (size_t)ldv * (size_t)k, cudaMemcpyDeviceToHost);
-        
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: D2H copy complete." << std::endl;
+
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Transposing U and V to row-major format." << std::endl;
             U_row.resize((size_t)m * (size_t)k);
             for (int i = 0; i < m; ++i)
                 for (int j = 0; j < k; ++j)
                     U_row[(size_t)i * (size_t)k + (size_t)j] = U_col[(size_t)i + (size_t)j * (size_t)ldu];
-        
+
             VT_row.resize((size_t)k * (size_t)n);
             for (int i = 0; i < k; ++i)
                 for (int j = 0; j < n; ++j)
                     VT_row[(size_t)i * (size_t)n + (size_t)j] = std::conj(V_col[(size_t)j + (size_t)i * (size_t)ldv]);
-        
+
+            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Freeing GPU memory." << std::endl;
             cudaFree(d_info);
             cudaFree(d_V);
             cudaFree(d_U);
             cudaFree(d_S);
             cudaFree(d_A);
+
+            std::cout << "[RANK " << rank << "] <--- gpu_svd_jacobi: Exiting." << std::endl;
         }
 
         void local_svd_and_reconstruct_tensors(
@@ -846,18 +863,22 @@ namespace NWQSim
             tamm::Scheduler& sch_local,
             tamm::ExecutionContext& ec_global)
         {
+            int rank = pg.rank().value();
+            std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_tensors: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
+
             auto& ec_local = sch_local.ec();
             const IdxType phys_dim = 2;
-        
+
             IdxType Dl = bond_dims[q0];
             IdxType Dr = bond_dims[q1 + 1];
             int m = Dl * phys_dim;
             int n = phys_dim * Dr;
             std::vector<Cplx> M2_col_major(m * n);
-        
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Reshaping M2_local tensor into column-major matrix of size (" << m << ", " << n << ")." << std::endl;
+
             std::vector<Cplx> M2_hostbuf(M2_local.size());
             M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
-        
+
             size_t c = 0;
             for (size_t l = 0; l < Dl; ++l)
             for (size_t p0 = 0; p0 < phys_dim; ++p0)
@@ -868,11 +889,14 @@ namespace NWQSim
                 size_t col = p1 * Dr + r;
                 M2_col_major[row + col * m] = M2_hostbuf[c];
             }
-        
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Reshape complete." << std::endl;
+
             std::vector<double> S;
             std::vector<Cplx> U_row, VT_row;
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Calling gpu_svd_jacobi..." << std::endl;
             gpu_svd_jacobi(M2_col_major.data(), m, n, S, U_row, VT_row);
-        
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Returned from gpu_svd_jacobi." << std::endl;
+
             std::vector<IdxType> keep;
             keep.reserve(S.size());
             for (size_t i = 0; i < S.size(); ++i) {
@@ -884,29 +908,32 @@ namespace NWQSim
             if (chi == 0) {
                 chi = 1;
             }
-        
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Truncation complete. Kept " << keep.size() << " singular values. New bond dimension (chi): " << chi << "." << std::endl;
+
             bond_dims[q0 + 1] = chi;
             tamm::TiledIndexSpace new_bond_tis{tamm::IndexSpace{tamm::range(chi)}, static_cast<tamm::Tile>(block_size)};
-        
+
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Reconstructing new tensors in GLOBAL context." << std::endl;
             Ti_new = tamm::Tensor<Cplx>({ bond_tis[q0], phys_tis[q0], new_bond_tis });
             Ti_new.set_dense();
-            Ti_new.allocate(&ec_global); 
-        
+            Ti_new.allocate(&ec_global);
+
             Tj_new = tamm::Tensor<Cplx>({ new_bond_tis, phys_tis[q1], bond_tis[q1 + 1] });
             Tj_new.set_dense();
             Tj_new.allocate(&ec_global);
             
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Populating Ti_new (left tensor)." << std::endl;
             std::vector<Cplx> Ti_hostbuf(Ti_new.size());
             c = 0;
             for (size_t l = 0; l < Dl; ++l)
             for (size_t p0 = 0; p0 < phys_dim; ++p0)
             for (size_t b = 0; b < chi; ++b, ++c)
             {
-                // Corrected indexing into U_row
                 Ti_hostbuf[c] = U_row[(l * phys_dim + p0) * S.size() + keep[b]];
             }
             Ti_new.put(*(Ti_new.loop_nest().begin()), Ti_hostbuf);
-        
+
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_tensors: Populating Tj_new (right tensor)." << std::endl;
             std::vector<Cplx> Tj_hostbuf(Tj_new.size());
             c = 0;
             for (size_t b = 0; b < chi; ++b)
@@ -916,6 +943,8 @@ namespace NWQSim
                 Tj_hostbuf[c] = Cplx(S[keep[b]], 0.0) * VT_row[keep[b] * n + (p1 * Dr + r)];
             }
             Tj_new.put(*(Tj_new.loop_nest().begin()), Tj_hostbuf);
+
+            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_tensors: Exiting." << std::endl;
         }
 
         void right_canonicalize(std::vector<tamm::Tensor<Cplx>> &MPS)
