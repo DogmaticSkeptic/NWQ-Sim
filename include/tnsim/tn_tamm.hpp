@@ -412,12 +412,8 @@ namespace NWQSim
             last_layer.reserve(this->n_qubits);
 
             std::cout << "[RANK " << rank << "] simulation_kernel: Starting gate layering for " << gates.size() << " gates." << std::endl;
-            int gate_counter = 0;
             // Gate layering logic remains the same...
             for (const auto& g : gates) {
-                // The print statements below are commented out by default to avoid excessive output,
-                // but you can uncomment them if you suspect the crash is during the layering phase.
-                // std::cout << "[RANK " << rank << "] simulation_kernel: Processing gate #" << gate_counter++ << std::endl;
                 if (g.op_name == OP::C2) {
                     int a = g.ctrl;
                     int b = g.qubit;
@@ -512,7 +508,8 @@ namespace NWQSim
                     std::cout << "[RANK " << rank << "] run_gates_parallel: Gate " << gate_idx << " is a C2 gate on qubits (" << g.ctrl << ", " << g.qubit << "). Calling C2_GATE_L." << std::endl;
                     std::array<Cplx, 16> U4;
                     for (int i=0; i<16; ++i) U4[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
-                    local_results.push_back(C2_GATE_L(U4, g.ctrl, g.qubit, sch_local));
+                    // Pass the GLOBAL execution context (this->ec) to the C2 gate function
+                    local_results.push_back(C2_GATE_L(U4, g.ctrl, g.qubit, sch_local, this->ec));
                     std::cout << "[RANK " << rank << "] run_gates_parallel: Returned from C2_GATE_L for gate " << gate_idx << "." << std::endl;
                 }
             }
@@ -529,11 +526,11 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] << Exiting run_gates_parallel. Returning " << local_results.size() << " local results." << std::endl;
             return local_results;
         }
+
         std::vector<GateUpdateMetadata> allgather_metadata(const std::vector<GateUpdateResult>& local_results) {
             int rank = pg.rank().value();
             std::cout << "[RANK " << rank << "] >> Entering allgather_metadata. Processing " << local_results.size() << " local results." << std::endl;
 
-            // 1. Create a POD-safe metadata vector from this rank's local results.
             std::vector<GateUpdateMetadata> local_metadata;
             local_metadata.reserve(local_results.size());
             for(const auto& res : local_results) {
@@ -549,15 +546,13 @@ namespace NWQSim
             }
             std::cout << "[RANK " << rank << "] allgather_metadata: Created " << local_metadata.size() << " local metadata entries." << std::endl;
         
-            // 2. Gather the number of metadata entries (in bytes) each rank will send.
             int local_size_bytes = local_metadata.size() * sizeof(GateUpdateMetadata);
             std::vector<int> all_sizes_bytes(pg.size().value());
             
             std::cout << "[RANK " << rank << "] allgather_metadata: Calling allgather for sizes. This rank is sending size " << local_size_bytes << " bytes." << std::endl;
             pg.allgather(&local_size_bytes, 1, all_sizes_bytes.data(), 1);
             
-            // Optional: Print what sizes this rank received from everyone
-            if (rank == 0) { // Only rank 0 prints to avoid clutter
+            if (rank == 0) {
                 std::cout << "[RANK 0] allgather_metadata: Received sizes from all ranks (bytes): [";
                 for(size_t i = 0; i < all_sizes_bytes.size(); ++i) {
                     std::cout << all_sizes_bytes[i] << (i == all_sizes_bytes.size() - 1 ? "" : ", ");
@@ -565,26 +560,33 @@ namespace NWQSim
                 std::cout << "]" << std::endl;
             }
         
-            // 3. Calculate displacements (in bytes) for the Allgatherv operation.
             std::vector<int> displacements_bytes(pg.size().value(), 0);
-            int total_size_bytes = all_sizes_bytes[0];
-            for (size_t i = 1; i < all_sizes_bytes.size(); ++i) {
-                displacements_bytes[i] = displacements_bytes[i-1] + all_sizes_bytes[i-1];
+            int total_size_bytes = 0;
+            // Corrected displacement calculation
+            for (size_t i = 0; i < all_sizes_bytes.size(); ++i) {
+                if (i > 0) {
+                    displacements_bytes[i] = displacements_bytes[i-1] + all_sizes_bytes[i-1];
+                }
                 total_size_bytes += all_sizes_bytes[i];
             }
+
             std::cout << "[RANK " << rank << "] allgather_metadata: Calculated displacements. Total metadata size: " << total_size_bytes << " bytes." << std::endl;
             
-            // 4. Perform the Allgatherv using the raw MPI communicator.
-            std::vector<GateUpdateMetadata> all_metadata(total_size_bytes / sizeof(GateUpdateMetadata));
-            std::cout << "[RANK " << rank << "] allgather_metadata: Calling MPI_Allgatherv..." << std::endl;
-            MPI_Allgatherv(local_metadata.data(),
-                           local_size_bytes,
-                           MPI_BYTE,
-                           all_metadata.data(),
-                           all_sizes_bytes.data(),
-                           displacements_bytes.data(),
-                           MPI_BYTE,
-                           pg.comm());
+            std::vector<GateUpdateMetadata> all_metadata;
+            if (total_size_bytes > 0) {
+                all_metadata.resize(total_size_bytes / sizeof(GateUpdateMetadata));
+                std::cout << "[RANK " << rank << "] allgather_metadata: Calling MPI_Allgatherv..." << std::endl;
+                MPI_Allgatherv(local_metadata.data(),
+                               local_size_bytes,
+                               MPI_BYTE,
+                               all_metadata.data(),
+                               all_sizes_bytes.data(),
+                               displacements_bytes.data(),
+                               MPI_BYTE,
+                               pg.comm());
+            } else {
+                 std::cout << "[RANK " << rank << "] allgather_metadata: No metadata to gather, skipping MPI_Allgatherv." << std::endl;
+            }
             
             std::cout << "[RANK " << rank << "] << Exiting allgather_metadata. Total metadata entries gathered: " << all_metadata.size() << std::endl;
             return all_metadata;
@@ -595,14 +597,14 @@ namespace NWQSim
             int rank = pg.rank().value();
             std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
 
-            // Phase 2a: Every rank sends its metadata and receives everyone else's.
+            // Phase 1: All ranks exchange metadata about the updates they computed.
             auto all_metadata = allgather_metadata(local_results);
             std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
 
             tamm::Scheduler sch{ec};
             int local_result_idx = 0;
 
-            // Phase 2b: Iterate through the complete list of updates. All ranks do this.
+            // Phase 2: All ranks iterate through the global list of updates and apply them.
             int meta_idx = 0;
             for (const auto& meta : all_metadata)
             {
@@ -659,49 +661,36 @@ namespace NWQSim
         {
             auto& ec_local = sch_local.ec();
         
-            // 1. LOCAL SETUP
-            // Build the 2x2 gate tensor G. This tensor is local to the current rank.
             tamm::Tensor<Cplx> G({phys_tis[site], phys_tis[site]});
             G.set_dense();
             G.allocate(&ec_local);
         
-            // This lambda populates the gate tensor G.
             auto fill_g = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
                 auto offsets = G.block_offsets(bid);
                 auto pout = offsets[0];
                 auto pin = offsets[1];
-                buf[0] = U[pout * 2 + pin]; // block size is 1
+                buf[0] = U[pout * 2 + pin]; 
             };
             tamm::update_tensor(G, fill_g);
         
-            // Create a new local tensor to store the result of the contraction.
             tamm::Tensor<Cplx> Tnew_local({bond_tis[site], phys_tis[site], bond_tis[site + 1]});
             Tnew_local.set_dense();
             Tnew_local.allocate(&ec_local);
         
-            // 2. IMPLICIT GATHER & COMPUTE
-            // TAMM handles the communication automatically. sch_local coordinates
-            // fetching the required blocks from the global mps_tensors[site]
-            // because it's part of the operation.
             sch_local(Tnew_local("l","p'","r") = G("p'","p") * mps_tensors[site]("l","p","r")).execute();
         
-            // 3. IMPLICIT SCATTER
-            // Assign the local result back to the global tensor. TAMM's scheduler
-            // will manage scattering the data from Tnew_local back to the
-            // distributed mps_tensors[site].
             sch_local(mps_tensors[site]("l","p","r") = Tnew_local("l","p","r")).execute();
         
-            // 4. CLEANUP
-            // Deallocate the temporary local tensors.
             G.deallocate();
             Tnew_local.deallocate();
         }
-
-        GateUpdateResult C2_GATE_L(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1, tamm::Scheduler& sch_local)
+        
+        // This function now takes the GLOBAL execution context as an argument
+        GateUpdateResult C2_GATE_L(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1, tamm::Scheduler& sch_local, tamm::ExecutionContext& ec_global)
         {
             auto& ec_local = sch_local.ec();
         
-            // GATHER STEP (remains the same)
+            // GATHER STEP (uses local context for temporary copies)
             tamm::Tensor<Cplx> T0_local({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
             tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
             T0_local.set_dense();
@@ -710,7 +699,7 @@ namespace NWQSim
             sch_local(T0_local("l", "p", "b") = mps_tensors[q0]("l", "p", "b")).execute();
             sch_local(T1_local("b", "p", "r") = mps_tensors[q1]("b", "p", "r")).execute();
         
-            // LOCAL COMPUTE STEP (remains the same)
+            // LOCAL COMPUTE STEP (uses local context for intermediates)
             tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M_local.set_dense(); M_local.allocate(&ec_local);
             sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute();
@@ -730,16 +719,17 @@ namespace NWQSim
             
             sch_local.deallocate(T0_local, T1_local, M_local, G4_local).execute();
             
-            tamm::Tensor<Cplx> Ti_new_local, Tj_new_local;
-            local_svd_and_reconstruct_tensors(M2_local, Ti_new_local, Tj_new_local, q0, q1, sch_local);
+            // RESULT TENSOR PREPARATION
+            tamm::Tensor<Cplx> Ti_new_global, Tj_new_global;
+            // The helper function now allocates the result tensors in the GLOBAL context
+            local_svd_and_reconstruct_tensors(M2_local, Ti_new_global, Tj_new_global, q0, q1, sch_local, ec_global);
             
-            // This function now returns the result instead of trying to scatter it.
             GateUpdateResult result;
             result.is_valid = true;
             result.q0 = q0;
             result.q1 = q1;
-            result.new_T0_local = std::move(Ti_new_local);
-            result.new_T1_local = std::move(Tj_new_local);
+            result.new_T0_local = std::move(Ti_new_global);
+            result.new_T1_local = std::move(Tj_new_global);
             
             sch_local.deallocate(M2_local).execute();
     
@@ -820,22 +810,18 @@ namespace NWQSim
             cudaFree(d_A);
         }
 
+        // This function now takes the GLOBAL execution context as an argument
         void local_svd_and_reconstruct_tensors(
             tamm::Tensor<Cplx>& M2_local,
-            tamm::Tensor<Cplx>& Ti_new_local,
-            tamm::Tensor<Cplx>& Tj_new_local,
+            tamm::Tensor<Cplx>& Ti_new,
+            tamm::Tensor<Cplx>& Tj_new,
             IdxType q0, IdxType q1,
-            tamm::Scheduler& sch_local)
+            tamm::Scheduler& sch_local,
+            tamm::ExecutionContext& ec_global) // Takes global EC
         {
             auto& ec_local = sch_local.ec();
-            const IdxType phys_dim = 2; // Physical dimension of a qubit is always 2.
+            const IdxType phys_dim = 2;
         
-            //================================================================================
-            // STEP 1: Extract data from the local TAMM tensor and reshape it into a 2D
-            //         column-major matrix suitable for cuSOLVER.
-            // TAMM Tensor dimensions: (Dl, phys_dim, phys_dim, Dr)
-            // Matrix dimensions:      (Dl * phys_dim) x (phys_dim * Dr)
-            //================================================================================
             IdxType Dl = bond_dims[q0];
             IdxType Dr = bond_dims[q1 + 1];
             int m = Dl * phys_dim;
@@ -843,7 +829,6 @@ namespace NWQSim
             std::vector<Cplx> M2_col_major(m * n);
         
             std::vector<Cplx> M2_hostbuf(M2_local.size());
-            // CORRECTED: Use an iterator to get the single block ID from the loop nest.
             M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
         
             size_t c = 0;
@@ -854,20 +839,13 @@ namespace NWQSim
             {
                 size_t row = l * phys_dim + p0;
                 size_t col = p1 * Dr + r;
-                // Convert from TAMM's C-style (row-major) layout to cuSOLVER's Fortran-style (column-major)
                 M2_col_major[row + col * m] = M2_hostbuf[c];
             }
         
-            //================================================================================
-            // STEP 2: Perform the Singular Value Decomposition on the GPU.
-            //================================================================================
             std::vector<double> S;
             std::vector<Cplx> U_row, VT_row;
             gpu_svd_jacobi(M2_col_major.data(), m, n, S, U_row, VT_row);
         
-            //================================================================================
-            // STEP 3: Truncate the singular values to determine the new bond dimension.
-            //================================================================================
             std::vector<IdxType> keep;
             keep.reserve(S.size());
             for (size_t i = 0; i < S.size(); ++i) {
@@ -877,51 +855,40 @@ namespace NWQSim
             }
             IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
             if (chi == 0) {
-                chi = 1; // Bond dimension must be at least 1
+                chi = 1;
             }
         
-            // Update the bond dimension metadata for the next gate layer.
             bond_dims[q0 + 1] = chi;
-            // CORRECTED: Explicitly cast the signed int 'block_size' to the unsigned 'tamm::Tile'.
             tamm::TiledIndexSpace new_bond_tis{tamm::IndexSpace{tamm::range(chi)}, static_cast<tamm::Tile>(block_size)};
         
-            //================================================================================
-            // STEP 4: Reconstruct the new local TAMM tensors from the SVD results.
-            //================================================================================
+            // Allocate the new tensors in the GLOBAL execution context.
+            Ti_new = tamm::Tensor<Cplx>({ bond_tis[q0], phys_tis[q0], new_bond_tis });
+            Ti_new.set_dense();
+            Ti_new.allocate(&ec_global); 
         
-            // Build the new left tensor Ti_new_local from the U matrix.
-            Ti_new_local = tamm::Tensor<Cplx>({ bond_tis[q0], phys_tis[q0], new_bond_tis });
-            Ti_new_local.set_dense();
-            Ti_new_local.allocate(&ec_local);
+            Tj_new = tamm::Tensor<Cplx>({ new_bond_tis, phys_tis[q1], bond_tis[q1 + 1] });
+            Tj_new.set_dense();
+            Tj_new.allocate(&ec_global);
             
-            std::vector<Cplx> Ti_hostbuf(Ti_new_local.size());
+            std::vector<Cplx> Ti_hostbuf(Ti_new.size());
             c = 0;
             for (size_t l = 0; l < Dl; ++l)
             for (size_t p0 = 0; p0 < phys_dim; ++p0)
             for (size_t b = 0; b < chi; ++b, ++c)
             {
-                // U_row is row-major, so access is [row * num_cols + col]
-                Ti_hostbuf[c] = U_row[(l * phys_dim + p0) * chi + b];
+                Ti_hostbuf[c] = U_row[(l * phys_dim + p0) * S.size() + keep[b]];
             }
-            // CORRECTED: Use an iterator to get the single block ID.
-            Ti_new_local.put(*(Ti_new_local.loop_nest().begin()), Ti_hostbuf);
+            Ti_new.put(*(Ti_new.loop_nest().begin()), Ti_hostbuf);
         
-            // Build the new right tensor Tj_new_local from the S and V^T matrices.
-            Tj_new_local = tamm::Tensor<Cplx>({ new_bond_tis, phys_tis[q1], bond_tis[q1 + 1] });
-            Tj_new_local.set_dense();
-            Tj_new_local.allocate(&ec_local);
-        
-            std::vector<Cplx> Tj_hostbuf(Tj_new_local.size());
+            std::vector<Cplx> Tj_hostbuf(Tj_new.size());
             c = 0;
             for (size_t b = 0; b < chi; ++b)
             for (size_t p1 = 0; p1 < phys_dim; ++p1)
             for (size_t r = 0; r < Dr; ++r, ++c)
             {
-                // VT_row is row-major. Multiply by the singular value.
-                Tj_hostbuf[c] = Cplx(S[b], 0.0) * VT_row[b * n + (p1 * Dr + r)];
+                Tj_hostbuf[c] = Cplx(S[keep[b]], 0.0) * VT_row[keep[b] * n + (p1 * Dr + r)];
             }
-            // CORRECTED: Use an iterator to get the single block ID.
-            Tj_new_local.put(*(Tj_new_local.loop_nest().begin()), Tj_hostbuf);
+            Tj_new.put(*(Tj_new.loop_nest().begin()), Tj_hostbuf);
         }
 
         void right_canonicalize(std::vector<tamm::Tensor<Cplx>> &MPS)
