@@ -330,37 +330,81 @@ namespace NWQSim
             return t;
         }
     
-        static void place_c1(const SVGate& s,
-                                    std::vector<std::vector<SVGate>>& layers,
-                                    std::unordered_map<int,int>& last_layer)
-        {
-            // Place in the layer immediately after this qubit was last used
-            int L = last_layer[s.qubit] + 1;
-            if (L > static_cast<int>(layers.size())) layers.resize(L);
-            layers[L - 1].push_back(s);
-            last_layer[s.qubit] = L;
+       // Helper function to check for conflicts in a layer
+        bool has_conflict(int qubit, const std::vector<SVGate>& layer) {
+            for (const auto& gate : layer) {
+                if (gate.op_name == OP::C1 && gate.qubit == qubit) {
+                    return true;
+                }
+                if (gate.op_name == OP::C2 && (gate.qubit == qubit || gate.ctrl == qubit)) {
+                    return true;
+                }
+            }
+            return false;
         }
-    
-        static void place_c2(const SVGate& t, int a, int b,
-                                    std::vector<std::vector<SVGate>>& layers,
-                                    std::unordered_map<int,int>& last_layer)
+        
+        bool has_conflict(int qubit1, int qubit2, const std::vector<SVGate>& layer) {
+            for (const auto& gate : layer) {
+                if (gate.op_name == OP::C1 && (gate.qubit == qubit1 || gate.qubit == qubit2)) {
+                    return true;
+                }
+                if (gate.op_name == OP::C2 && (gate.qubit == qubit1 || gate.ctrl == qubit1 ||
+                                               gate.qubit == qubit2 || gate.ctrl == qubit2)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        
+        void place_c1(const SVGate& s,
+                      std::vector<std::vector<SVGate>>& layers,
+                      std::unordered_map<int,int>& last_layer)
         {
-            // Place in the layer immediately after BOTH qubits were last used
+            int q = s.qubit;
+            int L = last_layer[q] + 1; // Start checking from the layer after the last use
+        
+            while (true) {
+                if (L > layers.size()) {
+                    layers.resize(L);
+                }
+                // Check for conflicts in the current target layer L-1
+                if (!has_conflict(q, layers[L - 1])) {
+                    layers[L - 1].push_back(s);
+                    last_layer[q] = L;
+                    break; // Gate has been placed, exit the loop
+                }
+                L++; // Conflict found, try the next layer
+            }
+        }
+        
+        void place_c2(const SVGate& t, int a, int b,
+                      std::vector<std::vector<SVGate>>& layers,
+                      std::unordered_map<int,int>& last_layer)
+        {
             int la = last_layer[a];
             int lb = last_layer[b];
-            int L = 1 + std::max(la, lb);
-            
+            int L = 1 + std::max(la, lb); // Start checking from the layer after the last use
+        
             SVGate x = t; // Create a mutable copy
             x.ctrl = a;
             x.qubit = b;
-    
-            if (L > static_cast<int>(layers.size())) layers.resize(L);
-            layers[L - 1].push_back(x);
-            // Update the last used layer for both qubits
-            last_layer[a] = L;
-            last_layer[b] = L;
-        }
         
+            while (true) {
+                if (L > layers.size()) {
+                    layers.resize(L);
+                }
+                // Check for conflicts in the current target layer L-1
+                if (!has_conflict(a, b, layers[L - 1])) {
+                    layers[L - 1].push_back(x);
+                    last_layer[a] = L;
+                    last_layer[b] = L;
+                    break; // Gate has been placed, exit the loop
+                }
+                L++; // Conflict found, try the next layer
+            }
+        } 
+
         // Optional but good for load balancing within a layer
         static void append_round_robin(const std::vector<SVGate>& layer, std::vector<SVGate>& out)
         {
