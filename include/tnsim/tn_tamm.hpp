@@ -587,14 +587,12 @@ namespace NWQSim
         
             tamm::Scheduler sch_global{ec};
             int local_result_idx = 0;
-        
-            // These resources are only created on the source rank, so they must be
-            // managed carefully within the rank-specific 'if' block.
+            
+            // Pointers to local resources, only initialized on the source rank
             tamm::ProcGroup* self_pg_put = nullptr;
             tamm::ExecutionContext* ec_local_put = nullptr;
             tamm::Scheduler* sch_local_put = nullptr;
             std::vector<tamm::Tensor<Cplx>> temp_tensors_to_deallocate;
-        
         
             for (const auto& meta : all_metadata)
             {
@@ -603,63 +601,61 @@ namespace NWQSim
                 IdxType q0 = meta.q0;
                 IdxType q1 = meta.q1;
         
-                // ALL ranks schedule deallocation of old global tensors.
                 sch_global.deallocate(mps_tensors[q0], mps_tensors[q1]);
         
-                // ALL ranks update their local description of the MPS structure.
                 bond_dims[q0 + 1] = meta.new_bond_dim;
                 tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
                 bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
         
-                // ALL ranks create new global tensor handles.
                 mps_tensors[q0] = tamm::Tensor<Cplx>{bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]};
                 mps_tensors[q1] = tamm::Tensor<Cplx>{bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]};
                 mps_tensors[q0].set_dense();
                 mps_tensors[q1].set_dense();
         
-                // ALL ranks schedule allocation of the new global tensors.
                 sch_global.allocate(mps_tensors[q0], mps_tensors[q1]);
         
-                // ONLY the rank that holds the new data schedules the put operation.
                 if (rank == meta.original_rank) {
                     auto& result_data = local_results[local_result_idx++];
                     assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
         
-                    // Create temporary local resources.
+                    // Create temporary local resources
                     self_pg_put = new tamm::ProcGroup(tamm::ProcGroup::create_self());
                     ec_local_put = new tamm::ExecutionContext(*self_pg_put, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local);
                     sch_local_put = new tamm::Scheduler(*ec_local_put);
         
-                    // Create LOCAL tensors to hold the new data.
+                    // Create and fill LOCAL tensors
                     tamm::Tensor<Cplx> T0_put({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
                     tamm::Tensor<Cplx> T1_put({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
                     T0_put.set_dense();
                     T1_put.set_dense();
-        
-                    // Allocate and fill the LOCAL tensors immediately.
                     sch_local_put->allocate(T0_put, T1_put).execute();
+                    
                     tamm::span<Cplx> t0_span{result_data.new_T0_data};
                     tamm::span<Cplx> t1_span{result_data.new_T1_data};
                     T0_put.put(*(T0_put.loop_nest().begin()), t0_span);
                     T1_put.put(*(T1_put.loop_nest().begin()), t1_span);
         
-                    // Schedule the copy from the LOCAL tensor to the new GLOBAL tensor.
+                    // Schedule the copy from LOCAL to GLOBAL tensor
                     sch_global(mps_tensors[q0]("l","p","b") = T0_put("l","p","b"));
                     sch_global(mps_tensors[q1]("b","p","r") = T1_put("b","p","r"));
-        
-                    // Add the temporary local tensors to a list for later cleanup.
+                    
                     temp_tensors_to_deallocate.push_back(T0_put);
                     temp_tensors_to_deallocate.push_back(T1_put);
                 }
             }
         
-            // ALL ranks execute the scheduled global operations (deallocs, allocs, and copies).
-            std::cout << "[RANK " << rank << "] apply_collective_updates: All operations for this layer have been scheduled. Calling sch.execute()..." << std::endl;
+            std::cout << "[RANK " << rank << "] apply_collective_updates: All operations scheduled. Calling sch.execute()..." << std::endl;
             sch_global.execute(exec_hw);
             std::cout << "[RANK " << rank << "] apply_collective_updates: Global scheduler finished." << std::endl;
         
-            // NOW it is safe for the source rank to clean up its local resources.
-            if (rank == local_results[0].original_rank && !local_results.empty()) { // Check if this rank did any work
+            // FIX: Add a barrier here. This is the crucial change.
+            // This ensures that all ranks have completed the global scheduler's work
+            // (including processing the 'put' from the source rank) before the
+            // source rank proceeds to destroy its local temporary resources.
+            pg.barrier();
+            
+            // Now that all communication is finished, the source rank can safely clean up.
+            if (!temp_tensors_to_deallocate.empty()) { // A simpler check to see if this rank did any work
                 std::cout << "[RANK " << rank << "] apply_collective_updates: Cleaning up temporary local resources." << std::endl;
                 for (auto& t : temp_tensors_to_deallocate) {
                     sch_local_put->deallocate(t);
