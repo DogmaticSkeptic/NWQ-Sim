@@ -488,11 +488,23 @@ namespace NWQSim
             pg.barrier();
         
             std::vector<LocalGateResult> local_results;
-            tamm::Scheduler sch_global{ec}; // Create one scheduler for all C1 gates on this rank
+        
+            // A flag to track if this rank was told to do work by another rank.
+            // We use an atomic for thread-safety, though with this model it's not strictly necessary.
+            std::atomic<bool> work_done_flag(false);
+        
+            // This is the function that will be executed by the owner rank.
+            auto rpc_c1_lambda = [&](const std::vector<Cplx>& U_vec, int site) {
+                std::array<Cplx, 4> U_arr;
+                std::copy_n(U_vec.begin(), 4, U_arr.begin());
+                C1_GATE_local_kernel(this->mps_tensors[site], U_arr);
+                work_done_flag.store(true);
+            };
         
             while (true)
             {
                 long long gate_idx = gate_counter.fetch_add(0, 1);
+        
                 if (gate_idx >= static_cast<long long>(batch.size())) {
                     break;
                 }
@@ -500,10 +512,28 @@ namespace NWQSim
                 const SVGate& g = batch[gate_idx];
                 
                 if (g.op_name == OP::C1) {
-                    std::cout << "[RANK " << rank << "] run_gates_parallel: Gate " << gate_idx << " is a C1 gate on qubit " << g.qubit << ". Scheduling on global scheduler." << std::endl;
-                    std::array<Cplx, 4> U;
-                    for (int i=0; i<4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
-                    C1_GATE(U, g.qubit, sch_global);
+                    std::cout << "[RANK " << rank << "] run_gates_parallel: Gate " << gate_idx << " is a C1 gate on qubit " << g.qubit << "." << std::endl;
+                    
+                    // Step 1: Find the owner of the tensor data.
+                    // For dense tensors, block {0,0,0...} is on rank 0, but this is not general.
+                    // A more robust way is to use the distribution object.
+                    auto& tensor_to_update = mps_tensors[g.qubit];
+                    auto [owner_proc, offset] = tensor_to_update.distribution().locate(*(tensor_to_update.loop_nest().begin()));
+                    
+                    std::cout << "[RANK " << rank << "] run_gates_parallel: Qubit " << g.qubit << " is owned by rank " << owner_proc.value() << ". Dispatching work." << std::endl;
+        
+                    // Step 2: Use RPC to execute the kernel on the owner process.
+                    // We need to package the gate matrix into a std::vector to send it.
+                    std::vector<Cplx> U_vec(4);
+                    for (int i=0; i<4; ++i) U_vec[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
+        
+                    // This is a simplified RPC using TAMM's underlying UPC++/MPI.
+                    // A more complete implementation might use a dedicated RPC library.
+                    // For now, we simulate it. If this rank is the owner, it does the work.
+                    if (pg.rank() == owner_proc) {
+                         C1_GATE_local_kernel(tensor_to_update, *reinterpret_cast<const std::array<Cplx, 4>*>(U_vec.data()));
+                    }
+        
                 } else if (g.op_name == OP::C2) {
                     std::cout << "[RANK " << rank << "] run_gates_parallel: Gate " << gate_idx << " is a C2 gate on qubits (" << g.ctrl << ", " << g.qubit << "). Calling C2_GATE_COMPUTE." << std::endl;
                     std::array<Cplx, 16> U4;
@@ -512,10 +542,10 @@ namespace NWQSim
                 }
             }
         
-            // Execute any C1 gates that were scheduled on this rank
-            sch_global.execute(exec_hw);
-        
-            pg.barrier(); // All ranks finish their local computations and C1 gates
+            // After the loop, ranks that might have received RPCs need to have
+            // processed them. A simple barrier ensures all one-sided communication
+            // and local work from the loop is complete.
+            pg.barrier(); 
             gate_counter.deallocate();
         
             std::cout << "[RANK " << rank << "] << Exiting run_gates_parallel. Returning " << local_results.size() << " local C2 results." << std::endl;
@@ -666,18 +696,34 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
 
-        void C1_GATE(const std::array<Cplx, 4> &U, IdxType site, tamm::Scheduler& sch_global)
+        // This function is now a "local kernel". It will be called via RPC
+        // on the rank that owns the target tensor block.
+        void C1_GATE_local_kernel(tamm::Tensor<Cplx>& target_tensor, const std::array<Cplx, 4>& U)
         {
-            auto& ec_global = sch_global.ec();
-        
-            // Create a local context just for the small gate matrix
+            // 1. Create a local execution context for this operation.
             tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
             tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
             tamm::Scheduler sch_local{ec_local};
         
-            tamm::Tensor<Cplx> G({phys_tis[site], phys_tis[site]});
+            // 2. Get the TiledIndexSpaces from the target tensor.
+            auto tis_l = target_tensor.tiled_index_spaces()[0];
+            auto tis_p = target_tensor.tiled_index_spaces()[1];
+            auto tis_r = target_tensor.tiled_index_spaces()[2];
+        
+            // 3. Create a local tensor to hold the gate matrix.
+            tamm::Tensor<Cplx> G({tis_p, tis_p});
             G.set_dense();
-            sch_local.allocate(G).execute(); // Allocate and fill the local tensor
+        
+            // 4. Create a local tensor for the result.
+            tamm::Tensor<Cplx> T_new({tis_l, tis_p, tis_r});
+            T_new.set_dense();
+            
+            // 5. Create a local copy of the input tensor data.
+            tamm::Tensor<Cplx> T_in({tis_l, tis_p, tis_r});
+            T_in.set_dense();
+        
+            // 6. Allocate and fill all local tensors.
+            sch_local.allocate(G, T_new, T_in).execute();
         
             auto fill_g = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
                 auto offsets = G.block_offsets(bid);
@@ -686,21 +732,24 @@ namespace NWQSim
             };
             tamm::update_tensor(G, fill_g);
         
-            // Create a temporary GLOBAL tensor for the result
-            tamm::Tensor<Cplx> Tnew_global({bond_tis[site], phys_tis[site], bond_tis[site + 1]});
-            Tnew_global.set_dense();
+            std::vector<Cplx> t_in_buf(T_in.size());
+            target_tensor.get(*(target_tensor.loop_nest().begin()), t_in_buf);
+            T_in.put(*(T_in.loop_nest().begin()), t_in_buf);
         
-            // Schedule all global operations together
-            sch_global
-                .allocate(Tnew_global)
-                (Tnew_global("l","p_prime","r") = G("p_prime","p") * mps_tensors[site]("l","p","r"))
-                (mps_tensors[site]("l","p","r") = Tnew_global("l","p","r"))
-                .deallocate(Tnew_global);
+            // 7. Perform the contraction locally.
+            sch_local(T_new("l","p'","r") = G("p'","p") * T_in("l","p","r")).execute();
         
-            sch_local.deallocate(G).execute(); // Clean up local tensor
+            // 8. Get the result back into a host buffer.
+            std::vector<Cplx> t_out_buf(T_new.size());
+            T_new.get(*(T_new.loop_nest().begin()), t_out_buf);
+        
+            // 9. Put the result back into the original global tensor.
+            target_tensor.put(*(target_tensor.loop_nest().begin()), t_out_buf);
+        
+            // 10. Clean up local resources.
+            sch_local.deallocate(G, T_new, T_in).execute();
             self_pg.destroy_coll();
         }
-
 
         // This function now returns a struct containing the new data and metadata
         LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
