@@ -330,7 +330,6 @@ namespace NWQSim
             return t;
         }
     
-        // Helper function to check for conflicts in a layer
         bool has_conflict(int qubit, const std::vector<SVGate>& layer) {
             for (const auto& gate_in_layer : layer) {
                 if (gate_in_layer.op_name == OP::C1) {
@@ -353,17 +352,19 @@ namespace NWQSim
                       std::unordered_map<int,int>& last_layer)
         {
             int q = s.qubit;
-            int L = last_layer[q] + 1;
+            int L = last_layer[q] + 1; // Start checking from the layer after the last use
         
             while (true) {
-                if (L > layers.size()) layers.resize(L);
+                if (L > layers.size()) {
+                    layers.resize(L);
+                }
                 
                 if (!has_conflict(q, layers[L - 1])) {
                     layers[L - 1].push_back(s);
-                    last_layer[q] = L;
+                    last_layer[q] = L; // Update the last-used layer for this qubit
                     return;
                 }
-                L++;
+                L++; // Conflict found, try the next layer
             }
         }
         
@@ -373,12 +374,14 @@ namespace NWQSim
         {
             int L = 1 + std::max(last_layer[a], last_layer[b]);
         
-            SVGate x = t;
+            SVGate x = t; 
             x.ctrl = a;
             x.qubit = b;
         
             while (true) {
-                if (L > layers.size()) layers.resize(L);
+                if (L > layers.size()) {
+                    layers.resize(L);
+                }
         
                 if (!has_conflict(a, b, layers[L - 1])) {
                     layers[L - 1].push_back(x);
@@ -455,7 +458,6 @@ namespace NWQSim
                     int a = g.ctrl;
                     int b = g.qubit;
         
-                    // If it's a long-range gate, decompose it.
                     if (std::abs(a - b) > 1) {
                         bool reversed = a > b;
                         if (reversed) std::swap(a, b);
@@ -482,7 +484,6 @@ namespace NWQSim
             }
             std::cout << "[RANK " << rank << "] simulation_kernel: Pass 1 (Decomposition) complete. Original gates: " << gates.size() << ", Flat nearest-neighbor gates: " << flat_gates.size() << "." << std::endl;
         
-        
             // ************************************************************************
             // PASS 2: Layer the flat, nearest-neighbor circuit.
             // ************************************************************************
@@ -495,11 +496,38 @@ namespace NWQSim
                 if (g.op_name == OP::C1) {
                     place_c1(g, layers, last_layer);
                 } else if (g.op_name == OP::C2) {
-                    // All C2 gates are now guaranteed to be nearest-neighbor
                     place_c2(g, g.ctrl, g.qubit, layers, last_layer);
                 }
             }
             std::cout << "[RANK " << rank << "] simulation_kernel: Pass 2 (Layering) complete. Created " << layers.size() << " layers." << std::endl;
+        
+            // ************************************************************************
+            // DIAGNOSTIC CHECK: Verify that no layer has conflicting gates.
+            // ************************************************************************
+            for (size_t i = 0; i < layers.size(); ++i) {
+                const auto& layer = layers[i];
+                std::set<int> used_qubits_in_layer;
+                for (const auto& gate : layer) {
+                    if (gate.op_name == OP::C1) {
+                        if (used_qubits_in_layer.count(gate.qubit)) {
+                            std::stringstream ss;
+                            ss << "[RANK " << rank << "] FATAL ERROR: Layer " << i << " has a conflict! Qubit " << gate.qubit << " is used multiple times.";
+                            tamm::tamm_terminate(ss.str());
+                        }
+                        used_qubits_in_layer.insert(gate.qubit);
+                    } else if (gate.op_name == OP::C2) {
+                        if (used_qubits_in_layer.count(gate.ctrl) || used_qubits_in_layer.count(gate.qubit)) {
+                            std::stringstream ss;
+                            ss << "[RANK " << rank << "] FATAL ERROR: Layer " << i << " has a conflict! Qubits (" << gate.ctrl << ", " << gate.qubit << ") overlap with another gate in the same layer.";
+                            tamm::tamm_terminate(ss.str());
+                        }
+                        used_qubits_in_layer.insert(gate.ctrl);
+                        used_qubits_in_layer.insert(gate.qubit);
+                    }
+                }
+            }
+            if (rank == 0) std::cout << "simulation_kernel: Diagnostic check passed. All layers are conflict-free." << std::endl;
+        
         
             // ************************************************************************
             // EXECUTION: Execute the correctly formed layers.
