@@ -330,30 +330,21 @@ namespace NWQSim
             return t;
         }
     
-       // Helper function to check for conflicts in a layer
+        // Helper function to check for conflicts in a layer
         bool has_conflict(int qubit, const std::vector<SVGate>& layer) {
-            for (const auto& gate : layer) {
-                if (gate.op_name == OP::C1 && gate.qubit == qubit) {
-                    return true;
-                }
-                if (gate.op_name == OP::C2 && (gate.qubit == qubit || gate.ctrl == qubit)) {
-                    return true;
+            for (const auto& gate_in_layer : layer) {
+                if (gate_in_layer.op_name == OP::C1) {
+                    if (gate_in_layer.qubit == qubit) return true;
+                } else if (gate_in_layer.op_name == OP::C2) {
+                    if (gate_in_layer.qubit == qubit || gate_in_layer.ctrl == qubit) return true;
                 }
             }
             return false;
         }
         
+        // Overload for two-qubit gates
         bool has_conflict(int qubit1, int qubit2, const std::vector<SVGate>& layer) {
-            for (const auto& gate : layer) {
-                if (gate.op_name == OP::C1 && (gate.qubit == qubit1 || gate.qubit == qubit2)) {
-                    return true;
-                }
-                if (gate.op_name == OP::C2 && (gate.qubit == qubit1 || gate.ctrl == qubit1 ||
-                                               gate.qubit == qubit2 || gate.ctrl == qubit2)) {
-                    return true;
-                }
-            }
-            return false;
+            return has_conflict(qubit1, layer) || has_conflict(qubit2, layer);
         }
         
         
@@ -362,19 +353,24 @@ namespace NWQSim
                       std::unordered_map<int,int>& last_layer)
         {
             int q = s.qubit;
-            int L = last_layer[q] + 1; // Start checking from the layer after the last use
+            int L = last_layer[q] + 1; // Determine the earliest possible layer
         
+            // Find the first layer (starting from L) that has no conflict
             while (true) {
+                // Ensure the layers vector is large enough
                 if (L > layers.size()) {
                     layers.resize(L);
                 }
-                // Check for conflicts in the current target layer L-1
+                
+                // If there's no conflict in the target layer (L-1), place the gate
                 if (!has_conflict(q, layers[L - 1])) {
                     layers[L - 1].push_back(s);
-                    last_layer[q] = L;
-                    break; // Gate has been placed, exit the loop
+                    last_layer[q] = L; // Update the last-used layer for this qubit
+                    return; // Done
                 }
-                L++; // Conflict found, try the next layer
+                
+                // Conflict found, try the next layer
+                L++;
             }
         }
         
@@ -382,28 +378,32 @@ namespace NWQSim
                       std::vector<std::vector<SVGate>>& layers,
                       std::unordered_map<int,int>& last_layer)
         {
-            int la = last_layer[a];
-            int lb = last_layer[b];
-            int L = 1 + std::max(la, lb); // Start checking from the layer after the last use
+            // Determine the earliest possible layer based on dependencies
+            int L = 1 + std::max(last_layer[a], last_layer[b]);
         
-            SVGate x = t; // Create a mutable copy
+            SVGate x = t; // Create a mutable copy to set qubits correctly
             x.ctrl = a;
             x.qubit = b;
         
+            // Find the first layer (starting from L) that has no conflict
             while (true) {
+                // Ensure the layers vector is large enough
                 if (L > layers.size()) {
                     layers.resize(L);
                 }
-                // Check for conflicts in the current target layer L-1
+        
+                // If there's no conflict in the target layer (L-1), place the gate
                 if (!has_conflict(a, b, layers[L - 1])) {
                     layers[L - 1].push_back(x);
-                    last_layer[a] = L;
+                    last_layer[a] = L; // Update last-used layer for both qubits
                     last_layer[b] = L;
-                    break; // Gate has been placed, exit the loop
+                    return; // Done
                 }
-                L++; // Conflict found, try the next layer
+        
+                // Conflict found, try the next layer
+                L++;
             }
-        } 
+        }
 
         // Optional but good for load balancing within a layer
         static void append_round_robin(const std::vector<SVGate>& layer, std::vector<SVGate>& out)
