@@ -353,23 +353,16 @@ namespace NWQSim
                       std::unordered_map<int,int>& last_layer)
         {
             int q = s.qubit;
-            int L = last_layer[q] + 1; // Determine the earliest possible layer
+            int L = last_layer[q] + 1;
         
-            // Find the first layer (starting from L) that has no conflict
             while (true) {
-                // Ensure the layers vector is large enough
-                if (L > layers.size()) {
-                    layers.resize(L);
-                }
+                if (L > layers.size()) layers.resize(L);
                 
-                // If there's no conflict in the target layer (L-1), place the gate
                 if (!has_conflict(q, layers[L - 1])) {
                     layers[L - 1].push_back(s);
-                    last_layer[q] = L; // Update the last-used layer for this qubit
-                    return; // Done
+                    last_layer[q] = L;
+                    return;
                 }
-                
-                // Conflict found, try the next layer
                 L++;
             }
         }
@@ -378,29 +371,21 @@ namespace NWQSim
                       std::vector<std::vector<SVGate>>& layers,
                       std::unordered_map<int,int>& last_layer)
         {
-            // Determine the earliest possible layer based on dependencies
             int L = 1 + std::max(last_layer[a], last_layer[b]);
         
-            SVGate x = t; // Create a mutable copy to set qubits correctly
+            SVGate x = t;
             x.ctrl = a;
             x.qubit = b;
         
-            // Find the first layer (starting from L) that has no conflict
             while (true) {
-                // Ensure the layers vector is large enough
-                if (L > layers.size()) {
-                    layers.resize(L);
-                }
+                if (L > layers.size()) layers.resize(L);
         
-                // If there's no conflict in the target layer (L-1), place the gate
                 if (!has_conflict(a, b, layers[L - 1])) {
                     layers[L - 1].push_back(x);
-                    last_layer[a] = L; // Update last-used layer for both qubits
+                    last_layer[a] = L;
                     last_layer[b] = L;
-                    return; // Done
+                    return;
                 }
-        
-                // Conflict found, try the next layer
                 L++;
             }
         }
@@ -457,35 +442,68 @@ namespace NWQSim
             int rank = pg.rank().value();
             std::cout << "[RANK " << rank << "] ==> Entering simulation_kernel." << std::endl;
         
-            std::vector<std::vector<SVGate>> layers;
-            layers.reserve(gates.size());
-            std::unordered_map<int,int> last_layer;
-            last_layer.reserve(this->n_qubits);
+            // ************************************************************************
+            // PASS 1: Decompose all gates into a single, flat list of nearest-neighbor gates.
+            // ************************************************************************
+            std::vector<SVGate> flat_gates;
+            flat_gates.reserve(gates.size() * 2); // Pre-allocate with a reasonable guess
         
-            std::cout << "[RANK " << rank << "] simulation_kernel: Starting gate layering for " << gates.size() << " gates." << std::endl;
-            // Gate layering logic remains the same...
             for (const auto& g : gates) {
-                if (g.op_name == OP::C2) {
+                if (g.op_name == OP::C1) {
+                    flat_gates.push_back(g);
+                } else if (g.op_name == OP::C2) {
                     int a = g.ctrl;
                     int b = g.qubit;
+        
+                    // If it's a long-range gate, decompose it.
                     if (std::abs(a - b) > 1) {
                         bool reversed = a > b;
                         if (reversed) std::swap(a, b);
-                        for (int k = a; k < b - 1; ++k) place_c2(make_swap_sv(k, k + 1), k, k + 1, layers, last_layer);
-                        SVGate local_gate = reversed ? make_local_c2_sv(g, b, b-1) : make_local_c2_sv(g, b-1, b);
-                        place_c2(local_gate, b - 1, b, layers, last_layer);
-                        for (int k = b - 1; k > a; --k) place_c2(make_swap_sv(k - 1, k), k - 1, k, layers, last_layer);
+        
+                        // Forward SWAPs to bring qubits adjacent
+                        for (int k = a; k < b - 1; ++k) {
+                            flat_gates.push_back(make_swap_sv(k, k + 1));
+                        }
+                        // The actual C2 gate, now on adjacent qubits
+                        if (reversed) {
+                            flat_gates.push_back(make_local_c2_sv(g, b, b - 1));
+                        } else {
+                            flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
+                        }
+                        // Backward SWAPs to return qubits to original positions
+                        for (int k = b - 2; k >= a; --k) {
+                            flat_gates.push_back(make_swap_sv(k, k + 1));
+                        }
                     } else {
-                        place_c2(g, g.ctrl, g.qubit, layers, last_layer);
+                        // It's already a nearest-neighbor gate.
+                        flat_gates.push_back(g);
                     }
-                } else if (g.op_name == OP::C1) {
-                    place_c1(g, layers, last_layer);
                 }
             }
-            std::cout << "[RANK " << rank << "] simulation_kernel: Gate layering complete. Created " << layers.size() << " layers." << std::endl;
+            std::cout << "[RANK " << rank << "] simulation_kernel: Pass 1 (Decomposition) complete. Original gates: " << gates.size() << ", Flat nearest-neighbor gates: " << flat_gates.size() << "." << std::endl;
         
         
-            // Execute the scheduled layers
+            // ************************************************************************
+            // PASS 2: Layer the flat, nearest-neighbor circuit.
+            // ************************************************************************
+            std::vector<std::vector<SVGate>> layers;
+            layers.reserve(flat_gates.size());
+            std::unordered_map<int,int> last_layer;
+            last_layer.reserve(this->n_qubits);
+        
+            for (const auto& g : flat_gates) {
+                if (g.op_name == OP::C1) {
+                    place_c1(g, layers, last_layer);
+                } else if (g.op_name == OP::C2) {
+                    // All C2 gates are now guaranteed to be nearest-neighbor
+                    place_c2(g, g.ctrl, g.qubit, layers, last_layer);
+                }
+            }
+            std::cout << "[RANK " << rank << "] simulation_kernel: Pass 2 (Layering) complete. Created " << layers.size() << " layers." << std::endl;
+        
+            // ************************************************************************
+            // EXECUTION: Execute the correctly formed layers.
+            // ************************************************************************
             int layer_idx = 0;
             for (const auto& layer : layers)
             {
@@ -500,20 +518,12 @@ namespace NWQSim
                 batch.reserve(layer.size());
                 append_round_robin(layer, batch);
         
-                // STAGE 1: Each rank computes its assigned gates and returns the raw data.
-                std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " has " << batch.size() << " gates. Calling run_gates_parallel..." << std::endl;
                 auto local_update_results = run_gates_parallel(batch);
-                std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " returned from run_gates_parallel. This rank has " << local_update_results.size() << " local C2 results." << std::endl;
-        
-                // Ensure all local computations are finished before the collective update.
+                
                 pg.barrier();
         
-                // STAGE 2: All ranks participate in updating the global MPS state.
-                std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << ": Calling apply_collective_updates..." << std::endl;
                 apply_collective_updates(local_update_results);
-                std::cout << "[RANK " << rank << "] simulation_kernel: Layer " << layer_idx << " returned from apply_collective_updates." << std::endl;
-        
-                // Ensure the global MPS is in a consistent state before starting the next layer.
+                
                 pg.barrier();
         
                 std::cout << "[RANK " << rank << "] simulation_kernel: ---------- FINISHED LAYER " << layer_idx << " ----------" << std::endl;
