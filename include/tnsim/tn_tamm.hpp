@@ -432,6 +432,21 @@ namespace NWQSim
                 if (j >= twos.size() && i < singles.size()) out.insert(out.end(), singles.begin() + i, singles.end());
             }
         }
+        
+        // In the TN_TAMM class
+        std::string gate_to_string(const SVGate& g) {
+            std::stringstream ss;
+            if (g.op_name == OP::C1) {
+                ss << "C1(" << g.qubit << ")";
+            } else if (g.op_name == OP::C2) {
+                ss << "C2(" << g.ctrl << "," << g.qubit << ")";
+            } else {
+                ss << "UNKNOWN";
+            }
+            return ss.str();
+        }
+
+
 
     protected:
         IdxType n_qubits;
@@ -455,97 +470,71 @@ namespace NWQSim
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
+            int nproc = pg.size().value();
             std::cout << "[RANK " << rank << "] ==> Entering simulation_kernel." << std::endl;
         
-            // ************************************************************************
-            // PASS 1: Decompose all gates into a single, flat list of nearest-neighbor gates.
-            // ************************************************************************
+            // PASS 1: Decompose gates.
             std::vector<SVGate> flat_gates;
             flat_gates.reserve(gates.size() * 2);
-        
             for (const auto& g : gates) {
-                if (g.op_name == OP::C1 || g.op_name == OP::C2) { // Process only C1 and C2 from the start
+                if (g.op_name == OP::C1 || g.op_name == OP::C2) {
                     if (g.op_name == OP::C1) {
                         flat_gates.push_back(g);
-                    } else { // It must be OP::C2
+                    } else {
                         int a = g.ctrl;
                         int b = g.qubit;
-        
                         if (std::abs(a - b) > 1) {
                             bool reversed = a > b;
                             if (reversed) std::swap(a, b);
-        
-                            for (int k = a; k < b - 1; ++k) {
-                                flat_gates.push_back(make_swap_sv(k, k + 1));
-                            }
-                            if (reversed) {
-                                flat_gates.push_back(make_local_c2_sv(g, b, b - 1));
-                            } else {
-                                flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
-                            }
-                            for (int k = b - 2; k >= a; --k) {
-                                flat_gates.push_back(make_swap_sv(k, k + 1));
-                            }
+                            for (int k = a; k < b - 1; ++k) flat_gates.push_back(make_swap_sv(k, k + 1));
+                            if (reversed) flat_gates.push_back(make_local_c2_sv(g, b, b - 1));
+                            else flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
+                            for (int k = b - 2; k >= a; --k) flat_gates.push_back(make_swap_sv(k, k + 1));
                         } else {
                             flat_gates.push_back(g);
                         }
                     }
                 }
-                // Any other gate type is now explicitly ignored and will not enter flat_gates.
             }
-            std::cout << "[RANK " << rank << "] simulation_kernel: Pass 1 (Decomposition) complete. Original gates: " << gates.size() << ", Flat C1/C2 gates: " << flat_gates.size() << "." << std::endl;
         
-        
-            // ************************************************************************
-            // PASS 2: Layer the flat, nearest-neighbor circuit.
-            // ************************************************************************
+            // PASS 2: Layer the circuit.
             std::vector<std::vector<SVGate>> layers;
             layers.reserve(flat_gates.size());
-            // CHANGED: Use std::map to guarantee deterministic ordering.
-            std::map<int,int> last_layer_map;
+            std::map<int, int> last_layer_map; // Using std::map for deterministic scheduling
         
             for (const auto& g : flat_gates) {
                 if (g.op_name == OP::C1) {
                     place_c1(g, layers, last_layer_map);
-                } else { // It can only be OP::C2
+                } else {
                     place_c2(g, g.ctrl, g.qubit, layers, last_layer_map);
                 }
             }
-            std::cout << "[RANK " << rank << "] simulation_kernel: Pass 2 (Layering) complete. Created " << layers.size() << " layers." << std::endl;
+            
+            pg.barrier(); // Sync after all ranks finish scheduling.
         
-            // ************************************************************************
-            // DIAGNOSTIC CHECK
-            // ************************************************************************
-            for (size_t i = 0; i < layers.size(); ++i) {
-                const auto& layer = layers[i];
-                std::set<int> used_qubits_in_layer;
-                for (const auto& gate : layer) {
-                    if (gate.op_name == OP::C1) {
-                        if (used_qubits_in_layer.count(gate.qubit)) {
-                            std::stringstream ss;
-                            ss << "[RANK " << rank << "] FATAL ERROR IN LAYERING: Layer " << i << " has a conflict! Qubit " << gate.qubit << " is used multiple times.";
-                            tamm::tamm_terminate(ss.str());
-                        }
-                        used_qubits_in_layer.insert(gate.qubit);
-                    } else if (gate.op_name == OP::C2) {
-                        if (used_qubits_in_layer.count(gate.ctrl) || used_qubits_in_layer.count(gate.qubit)) {
-                            std::stringstream ss;
-                            ss << "[RANK " << rank << "] FATAL ERROR IN LAYERING: Layer " << i << " has a conflict! Qubits (" << gate.ctrl << ", " << gate.qubit << ") overlap with another gate in the same layer.";
-                            tamm::tamm_terminate(ss.str());
-                        }
-                        used_qubits_in_layer.insert(gate.ctrl);
-                        used_qubits_in_layer.insert(gate.qubit);
-                    }
-                }
-            }
-            if (rank == 0) std::cout << "simulation_kernel: Diagnostic check passed. All layers are conflict-free." << std::endl;
-        
-            // ************************************************************************
-            // EXECUTION: Execute the correctly formed layers.
-            // ************************************************************************
+            // EXECUTION
             int layer_idx = 0;
             for (const auto& layer : layers)
             {
+                // --------------------------------------------------------------------
+                // NEW DIAGNOSTIC PRINTING BLOCK
+                // Each rank will print the contents of the *current* layer before executing it.
+                // The barriers ensure the output is clean and ordered by rank.
+                // --------------------------------------------------------------------
+                pg.barrier();
+                for (int i = 0; i < nproc; ++i) {
+                    if (rank == i) {
+                        std::cout << "[RANK " << rank << "] Schedule for Layer " << layer_idx << ": ";
+                        for (const auto& gate : layer) {
+                            std::cout << gate_to_string(gate) << " ";
+                        }
+                        std::cout << std::endl;
+                        std::cout.flush();
+                    }
+                    pg.barrier();
+                }
+                // --------------------------------------------------------------------
+        
                 if (layer.empty()) {
                     layer_idx++;
                     continue;
