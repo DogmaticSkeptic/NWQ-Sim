@@ -606,7 +606,7 @@ namespace NWQSim
         }
 
         // In the TN_TAMM class
-        std::vector<LocalGateResult> TN_TAMM::run_gates_parallel(const std::vector<SVGate>& batch)
+        std::vector<LocalGateResult> run_gates_parallel(const std::vector<SVGate>& batch)
         {
             int rank = pg.rank().value();
             if (rank == 0) {
