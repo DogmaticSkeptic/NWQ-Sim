@@ -866,7 +866,7 @@ namespace NWQSim
             T_in.set_dense();
         
             // 6. Allocate and fill all local tensors.
-            sch_local.allocate(G, T_new, T_in).execute();
+            sch_local.allocate(G, T_new, T_in).execute(exec_hw);
         
             auto fill_g = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
                 auto offsets = G.block_offsets(bid);
@@ -880,7 +880,7 @@ namespace NWQSim
             T_in.put(*(T_in.loop_nest().begin()), t_in_buf);
         
             // 7. Perform the contraction locally.
-            sch_local(T_new("l","p'","r") = G("p'","p") * T_in("l","p","r")).execute();
+            sch_local(T_new("l","p'","r") = G("p'","p") * T_in("l","p","r")).execute(exec_hw);
         
             // 8. Get the result back into a host buffer.
             std::vector<Cplx> t_out_buf(T_new.size());
@@ -890,7 +890,7 @@ namespace NWQSim
             target_tensor.put(*(target_tensor.loop_nest().begin()), t_out_buf);
         
             // 10. Clean up local resources.
-            sch_local.deallocate(G, T_new, T_in).execute();
+            sch_local.deallocate(G, T_new, T_in).execute(exec_hw);
             self_pg.destroy_coll();
         }
 
@@ -906,7 +906,7 @@ namespace NWQSim
             tamm::Tensor<Cplx> T0_local({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
             tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
             T0_local.set_dense(); T1_local.set_dense();
-            sch_local.allocate(T0_local, T1_local).execute();
+            sch_local.allocate(T0_local, T1_local).execute(exec_hw);
         
             // 3. GET data from the global mps_tensors into local std::vectors, then PUT to local tensors.
             std::vector<Cplx> t0_buf(T0_local.size());
@@ -922,9 +922,9 @@ namespace NWQSim
             tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
             tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
-            sch_local.allocate(M_local, G4_local, M2_local).execute();
+            sch_local.allocate(M_local, G4_local, M2_local).execute(exec_hw);
         
-            sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute();
+            sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
             
             auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
                 auto offsets = G4_local.block_offsets(bid);
@@ -933,7 +933,7 @@ namespace NWQSim
             };
             tamm::update_tensor(G4_local, fill_g4);
             
-            sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute();
+            sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
         
             // 5. Perform SVD on the local M2_local tensor.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
@@ -950,7 +950,7 @@ namespace NWQSim
             result.original_rank = pg.rank().value();
         
             // 7. Clean up all temporary local resources.
-            sch_local.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute();
+            sch_local.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
             self_pg.destroy_coll();
         
             return result;
