@@ -473,14 +473,14 @@ namespace NWQSim
         CuCtx cu_ctx_;
 
         // In the TN_TAMM class
+        
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] ==> Entering simulation_kernel." << std::endl;
+            if (rank == 0) std::cout << "==> Entering simulation_kernel." << std::endl;
         
             // ************************************************************************
             // STAGE 1: Gate Sorting
-            // Separate the circuit into parallelizable unitary gates and sequential non-unitary gates.
             // ************************************************************************
             std::vector<SVGate> parallel_gates;
             std::vector<SVGate> sequential_gates;
@@ -490,7 +490,6 @@ namespace NWQSim
                 } else if (g.op_name == OP::M || g.op_name == OP::MA || g.op_name == OP::RESET) {
                     sequential_gates.push_back(g);
                 } else {
-                    // It's good practice to handle unknown gates.
                     if (rank == 0) {
                         std::cout << "Warning: Unrecognized gate type encountered and ignored." << std::endl;
                     }
@@ -502,38 +501,49 @@ namespace NWQSim
                           << sequential_gates.size() << " sequential gates." << std::endl;
             }
         
-        
             // ************************************************************************
             // STAGE 2: Parallel Execution of Unitary Gates
-            // This section contains the logic we've already debugged.
             // ************************************************************************
             if (!parallel_gates.empty()) {
-                // PASS 1: Decompose gates.
+                // PASS 1: Decompose non-local gates into sequences of local SWAPs.
                 std::vector<SVGate> flat_gates;
-                flat_gates.reserve(parallel_gates.size() * 2);
+                flat_gates.reserve(parallel_gates.size() * 2); // Pre-allocate memory
+        
                 for (const auto& g : parallel_gates) {
                     if (g.op_name == OP::C1) {
                         flat_gates.push_back(g);
                     } else { // It must be OP::C2
                         int a = g.ctrl;
                         int b = g.qubit;
-                        if (std::abs(a - b) > 1) {
-                            bool reversed = a > b;
-                            if (reversed) std::swap(a, b);
-                            for (int k = a; k < b - 1; ++k) flat_gates.push_back(make_swap_sv(k, k + 1));
-                            if (reversed) flat_gates.push_back(make_local_c2_sv(g, b, b - 1));
-                            else flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
-                            for (int k = b - 2; k >= a; --k) flat_gates.push_back(make_swap_sv(k, k + 1));
+        
+                        // Based on the new rule, we assume a < b is always true.
+                        // The gate is non-local if the qubits are not adjacent.
+                        if (b - a > 1) {
+                            // Decompose C2(a, b) into SWAPs and a local C2 gate.
+                            // 1. Move qubit 'a' forward until it is adjacent to 'b'.
+                            for (int k = a; k < b - 1; ++k) {
+                                flat_gates.push_back(make_swap_sv(k, k + 1));
+                            }
+        
+                            // 2. Apply the C2 gate on the now-adjacent pair (b-1, b).
+                            //    The logical qubit 'a' is now at physical site 'b-1'.
+                            flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
+        
+                            // 3. Undo the SWAPs in reverse order to restore the original qubit layout.
+                            for (int k = b - 2; k >= a; --k) {
+                                flat_gates.push_back(make_swap_sv(k, k + 1));
+                            }
                         } else {
+                            // The gate is already local (b - a == 1).
                             flat_gates.push_back(g);
                         }
                     }
                 }
         
-                // PASS 2: Layer the circuit.
+                // PASS 2: Layer the flattened circuit for parallel execution.
                 std::vector<std::vector<SVGate>> layers;
                 layers.reserve(flat_gates.size());
-                std::map<int, int> last_layer_map; // Using std::map for deterministic scheduling
+                std::map<int, int> last_layer_map;
         
                 for (const auto& g : flat_gates) {
                     if (g.op_name == OP::C1) {
@@ -546,53 +556,37 @@ namespace NWQSim
                 pg.barrier(); 
         
                 // EXECUTION of layers
-                int layer_idx = 0;
-                for (const auto& layer : layers) {
+                for (int layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+                    const auto& layer = layers[layer_idx];
                     if (layer.empty()) {
-                        layer_idx++;
                         continue;
                     }
                     if (rank == 0) std::cout << "Starting parallel layer " << layer_idx << std::endl;
                     
-                    std::vector<SVGate> batch = layer; // No round-robin for simplicity and correctness
-                    auto local_update_results = run_gates_parallel(batch);
+                    auto local_update_results = run_gates_parallel(layer);
                     pg.barrier();
                     apply_collective_updates(local_update_results);
                     pg.barrier();
                     
                     if (rank == 0) std::cout << "Finished parallel layer " << layer_idx << std::endl;
-                    layer_idx++;
                 }
             }
         
-        
             // ************************************************************************
             // STAGE 3: Sequential Execution of Non-Unitary Gates
-            // All ranks must participate, as some of these operations (like MA_GATE) are collective.
             // ************************************************************************
-            pg.barrier(); // Ensure all parallel work is finished before starting this stage.
+            pg.barrier(); // Ensure all parallel work is finished.
             
             if (rank == 0 && !sequential_gates.empty()) {
                 std::cout << "---------- STARTING SEQUENTIAL GATES ----------" << std::endl;
             }
         
-            for (const auto &g : sequential_gates)
-            {
-                if (g.op_name == OP::RESET)
-                {
-                    if (rank == 0) std::cout << "Executing RESET on qubit " << g.qubit << std::endl;
+            for (const auto &g : sequential_gates) {
+                if (g.op_name == OP::RESET) {
                     RESET_GATE(g.qubit);
-                }
-                else if (g.op_name == OP::M)
-                {
-                    if (rank == 0) std::cout << "Executing M on qubit " << g.qubit << std::endl;
+                } else if (g.op_name == OP::M) {
                     M_GATE(g.qubit);
-                }
-                else if (g.op_name == OP::MA)
-                {
-                    if (rank == 0) std::cout << "Executing MA on all qubits." << std::endl;
-                    // The argument to MA_GATE is likely a placeholder for repetitions,
-                    // which seems to be 1 in this context.
+                } else if (g.op_name == OP::MA) {
                     MA_GATE(g.qubit); 
                 }
             }
@@ -602,7 +596,7 @@ namespace NWQSim
             }
         
             pg.barrier(); // Final sync after all operations.
-            std::cout << "[RANK " << rank << "] <== Exiting simulation_kernel." << std::endl;
+            if (rank == 0) std::cout << "<== Exiting simulation_kernel." << std::endl;
         }
 
         // In the TN_TAMM class
@@ -1033,103 +1027,6 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] <--- gpu_svd_jacobi: Exiting." << std::endl;
         }
 
-        IdxType local_svd_and_reconstruct_data(
-            tamm::Tensor<Cplx>& M2_local,
-            std::vector<Cplx>& Ti_new_data,
-            std::vector<Cplx>& Tj_new_data,
-            IdxType q0, IdxType q1)
-        {
-            int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data (EIGEN): Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
-        
-            // 1. Extract dimensions from the input tensor
-            const IdxType phys_dim = 2;
-            IdxType Dl = M2_local.tiled_index_spaces()[0].index_space().num_indices();
-            IdxType Dr = M2_local.tiled_index_spaces()[3].index_space().num_indices();
-        
-            Eigen::Index m = Dl * phys_dim;
-            Eigen::Index n = phys_dim * Dr;
-        
-            // 2. Reshape the row-major TAMM tensor data into a column-major Eigen matrix.
-            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> mat(m, n);
-            
-            std::vector<Cplx> M2_hostbuf(M2_local.size());
-            M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
-        
-            size_t c = 0;
-            for (size_t l = 0; l < Dl; ++l) {
-                for (size_t p0 = 0; p0 < phys_dim; ++p0) {
-                    for (size_t p1 = 0; p1 < phys_dim; ++p1) {
-                        for (size_t r = 0; r < Dr; ++r, ++c) {
-                            // Eigen's operator() handles the column-major layout automatically.
-                            mat(l * phys_dim + p0, p1 * Dr + r) = M2_hostbuf[c];
-                        }
-                    }
-                }
-            }
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Reshape to Eigen matrix complete." << std::endl;
-            
-            // 3. Compute the SVD using Eigen's robust BDCSVD.
-            Eigen::BDCSVD<decltype(mat)> svd(mat, Eigen::ComputeThinU | Eigen::ComputeThinV);
-            auto svals = svd.singularValues();
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): SVD computation complete." << std::endl;
-        
-            // 4. Truncate based on singular value cutoff and max bond dimension.
-            std::vector<IdxType> keep;
-            keep.reserve(svals.size());
-            for (IdxType i = 0; i < svals.size(); ++i) {
-                if (std::abs(svals(i)) >= sv_cutoff) {
-                    keep.push_back(i);
-                }
-            }
-            
-            IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
-            if (chi == 0 && svals.size() > 0) {
-                chi = 1; // Prevent bond dimension from ever becoming zero.
-            }
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
-        
-            // 5. Extract the truncated U, S, and Vh matrices.
-            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat(mat.rows(), chi);
-            Eigen::Matrix<Cplx, Eigen::Dynamic, 1> kept_svals(chi);
-            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Vh(chi, mat.cols());
-            for (IdxType k = 0; k < chi; ++k) {
-                IdxType i = keep[k];
-                Umat.col(k)   = svd.matrixU().col(i);
-                kept_svals(k) = svals(i);
-                Vh.row(k)     = svd.matrixV().col(i).adjoint();
-            }
-            
-            // 6. Populate the output vectors with the data for the new tensors.
-            
-            // 6a. Populate the new left tensor data (from Umat)
-            Ti_new_data.resize(Dl * phys_dim * chi);
-            c = 0;
-            for (size_t l = 0; l < Dl; ++l) {
-                for (size_t p0 = 0; p0 < phys_dim; ++p0) {
-                    for (size_t b = 0; b < chi; ++b, ++c) {
-                        Ti_new_data[c] = Umat(l * phys_dim + p0, b);
-                    }
-                }
-            }
-        
-            // 6b. Populate the new right tensor data (from S * Vh)
-            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> SV = kept_svals.asDiagonal() * Vh;
-            Tj_new_data.resize(chi * phys_dim * Dr);
-            c = 0;
-            for (size_t b = 0; b < chi; ++b) {
-                for (size_t p1 = 0; p1 < phys_dim; ++p1) {
-                    for (size_t r = 0; r < Dr; ++r, ++c) {
-                        Tj_new_data[c] = SV(b, p1 * Dr + r);
-                    }
-                }
-            }
-        
-            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data (EIGEN): Exiting." << std::endl;
-            return chi;
-        }
-
-
 //        IdxType local_svd_and_reconstruct_data(
 //            tamm::Tensor<Cplx>& M2_local,
 //            std::vector<Cplx>& Ti_new_data,
@@ -1137,74 +1034,171 @@ namespace NWQSim
 //            IdxType q0, IdxType q1)
 //        {
 //            int rank = pg.rank().value();
-//            std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
+//            std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data (EIGEN): Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
 //        
+//            // 1. Extract dimensions from the input tensor
 //            const IdxType phys_dim = 2;
 //            IdxType Dl = M2_local.tiled_index_spaces()[0].index_space().num_indices();
 //            IdxType Dr = M2_local.tiled_index_spaces()[3].index_space().num_indices();
 //        
-//            int m = Dl * phys_dim;
-//            int n = phys_dim * Dr;
+//            Eigen::Index m = Dl * phys_dim;
+//            Eigen::Index n = phys_dim * Dr;
 //        
-//            // Reshape the row-major TAMM tensor data into a column-major matrix for cuSOLVER.
-//            std::vector<Cplx> M2_col_major(m * n);
+//            // 2. Reshape the row-major TAMM tensor data into a column-major Eigen matrix.
+//            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> mat(m, n);
+//            
 //            std::vector<Cplx> M2_hostbuf(M2_local.size());
 //            M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
 //        
 //            size_t c = 0;
-//            for (size_t l = 0; l < Dl; ++l)
-//            for (size_t p0 = 0; p0 < phys_dim; ++p0)
-//            for (size_t p1 = 0; p1 < phys_dim; ++p1)
-//            for (size_t r = 0; r < Dr; ++r, ++c)
-//            {
-//                size_t row = l * phys_dim + p0;
-//                size_t col = p1 * Dr + r;
-//                M2_col_major[row + col * m] = M2_hostbuf[c];
+//            for (size_t l = 0; l < Dl; ++l) {
+//                for (size_t p0 = 0; p0 < phys_dim; ++p0) {
+//                    for (size_t p1 = 0; p1 < phys_dim; ++p1) {
+//                        for (size_t r = 0; r < Dr; ++r, ++c) {
+//                            // Eigen's operator() handles the column-major layout automatically.
+//                            mat(l * phys_dim + p0, p1 * Dr + r) = M2_hostbuf[c];
+//                        }
+//                    }
+//                }
 //            }
-//            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Reshape complete." << std::endl;
+//            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Reshape to Eigen matrix complete." << std::endl;
+//            
+//            // 3. Compute the SVD using Eigen's robust BDCSVD.
+//            Eigen::BDCSVD<decltype(mat)> svd(mat, Eigen::ComputeThinU | Eigen::ComputeThinV);
+//            auto svals = svd.singularValues();
+//            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): SVD computation complete." << std::endl;
 //        
-//            // Perform the SVD on the GPU.
-//            std::vector<double> S;
-//            std::vector<Cplx> U_row, VT_row;
-//            gpu_svd_jacobi(M2_col_major.data(), m, n, S, U_row, VT_row);
-//        
-//            // Truncate based on singular value cutoff and max bond dimension.
+//            // 4. Truncate based on singular value cutoff and max bond dimension.
 //            std::vector<IdxType> keep;
-//            keep.reserve(S.size());
-//            for (size_t i = 0; i < S.size(); ++i) {
-//                if (S[i] >= sv_cutoff) {
+//            keep.reserve(svals.size());
+//            for (IdxType i = 0; i < svals.size(); ++i) {
+//                if (std::abs(svals(i)) >= sv_cutoff) {
 //                    keep.push_back(i);
 //                }
 //            }
+//            
 //            IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
-//            if (chi == 0) {
-//                chi = 1; // Prevent bond dimension from becoming zero.
+//            if (chi == 0 && svals.size() > 0) {
+//                chi = 1; // Prevent bond dimension from ever becoming zero.
 //            }
-//            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
+//            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
 //        
-//            // Populate the output vectors with the data for the new tensors.
+//            // 5. Extract the truncated U, S, and Vh matrices.
+//            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat(mat.rows(), chi);
+//            Eigen::Matrix<Cplx, Eigen::Dynamic, 1> kept_svals(chi);
+//            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Vh(chi, mat.cols());
+//            for (IdxType k = 0; k < chi; ++k) {
+//                IdxType i = keep[k];
+//                Umat.col(k)   = svd.matrixU().col(i);
+//                kept_svals(k) = svals(i);
+//                Vh.row(k)     = svd.matrixV().col(i).adjoint();
+//            }
+//            
+//            // 6. Populate the output vectors with the data for the new tensors.
+//            
+//            // 6a. Populate the new left tensor data (from Umat)
 //            Ti_new_data.resize(Dl * phys_dim * chi);
 //            c = 0;
-//            for (size_t l = 0; l < Dl; ++l)
-//            for (size_t p0 = 0; p0 < phys_dim; ++p0)
-//            for (size_t b = 0; b < chi; ++b, ++c)
-//            {
-//                Ti_new_data[c] = U_row[(l * phys_dim + p0) * S.size() + keep[b]];
+//            for (size_t l = 0; l < Dl; ++l) {
+//                for (size_t p0 = 0; p0 < phys_dim; ++p0) {
+//                    for (size_t b = 0; b < chi; ++b, ++c) {
+//                        Ti_new_data[c] = Umat(l * phys_dim + p0, b);
+//                    }
+//                }
 //            }
 //        
+//            // 6b. Populate the new right tensor data (from S * Vh)
+//            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> SV = kept_svals.asDiagonal() * Vh;
 //            Tj_new_data.resize(chi * phys_dim * Dr);
 //            c = 0;
-//            for (size_t b = 0; b < chi; ++b)
-//            for (size_t p1 = 0; p1 < phys_dim; ++p1)
-//            for (size_t r = 0; r < Dr; ++r, ++c)
-//            {
-//                Tj_new_data[c] = Cplx(S[keep[b]], 0.0) * VT_row[keep[b] * n + (p1 * Dr + r)];
+//            for (size_t b = 0; b < chi; ++b) {
+//                for (size_t p1 = 0; p1 < phys_dim; ++p1) {
+//                    for (size_t r = 0; r < Dr; ++r, ++c) {
+//                        Tj_new_data[c] = SV(b, p1 * Dr + r);
+//                    }
+//                }
 //            }
 //        
-//            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data: Exiting." << std::endl;
+//            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data (EIGEN): Exiting." << std::endl;
 //            return chi;
 //        }
-//
+
+
+        IdxType local_svd_and_reconstruct_data(
+            tamm::Tensor<Cplx>& M2_local,
+            std::vector<Cplx>& Ti_new_data,
+            std::vector<Cplx>& Tj_new_data,
+            IdxType q0, IdxType q1)
+        {
+            int rank = pg.rank().value();
+            std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
+        
+            const IdxType phys_dim = 2;
+            IdxType Dl = M2_local.tiled_index_spaces()[0].index_space().num_indices();
+            IdxType Dr = M2_local.tiled_index_spaces()[3].index_space().num_indices();
+        
+            int m = Dl * phys_dim;
+            int n = phys_dim * Dr;
+        
+            // Reshape the row-major TAMM tensor data into a column-major matrix for cuSOLVER.
+            std::vector<Cplx> M2_col_major(m * n);
+            std::vector<Cplx> M2_hostbuf(M2_local.size());
+            M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
+        
+            size_t c = 0;
+            for (size_t l = 0; l < Dl; ++l)
+            for (size_t p0 = 0; p0 < phys_dim; ++p0)
+            for (size_t p1 = 0; p1 < phys_dim; ++p1)
+            for (size_t r = 0; r < Dr; ++r, ++c)
+            {
+                size_t row = l * phys_dim + p0;
+                size_t col = p1 * Dr + r;
+                M2_col_major[row + col * m] = M2_hostbuf[c];
+            }
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Reshape complete." << std::endl;
+        
+            // Perform the SVD on the GPU.
+            std::vector<double> S;
+            std::vector<Cplx> U_row, VT_row;
+            gpu_svd_jacobi(M2_col_major.data(), m, n, S, U_row, VT_row);
+        
+            // Truncate based on singular value cutoff and max bond dimension.
+            std::vector<IdxType> keep;
+            keep.reserve(S.size());
+            for (size_t i = 0; i < S.size(); ++i) {
+                if (S[i] >= sv_cutoff) {
+                    keep.push_back(i);
+                }
+            }
+            IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
+            if (chi == 0) {
+                chi = 1; // Prevent bond dimension from becoming zero.
+            }
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
+        
+            // Populate the output vectors with the data for the new tensors.
+            Ti_new_data.resize(Dl * phys_dim * chi);
+            c = 0;
+            for (size_t l = 0; l < Dl; ++l)
+            for (size_t p0 = 0; p0 < phys_dim; ++p0)
+            for (size_t b = 0; b < chi; ++b, ++c)
+            {
+                Ti_new_data[c] = U_row[(l * phys_dim + p0) * S.size() + keep[b]];
+            }
+        
+            Tj_new_data.resize(chi * phys_dim * Dr);
+            c = 0;
+            for (size_t b = 0; b < chi; ++b)
+            for (size_t p1 = 0; p1 < phys_dim; ++p1)
+            for (size_t r = 0; r < Dr; ++r, ++c)
+            {
+                Tj_new_data[c] = Cplx(S[keep[b]], 0.0) * VT_row[keep[b] * n + (p1 * Dr + r)];
+            }
+        
+            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data: Exiting." << std::endl;
+            return chi;
+        }
+
         void right_canonicalize(std::vector<tamm::Tensor<Cplx>> &MPS)
         {
             // canonicalize MPS from right end toward left
