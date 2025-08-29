@@ -405,7 +405,7 @@ namespace NWQSim
             }
         }
 
-        // Optional but good for load balancing within a layer
+        // In the TN_TAMM class
         static void append_round_robin(const std::vector<SVGate>& layer, std::vector<SVGate>& out)
         {
             std::vector<SVGate> singles;
@@ -419,20 +419,30 @@ namespace NWQSim
             }
             
             size_t i = 0, j = 0;
-            bool pick_single = singles.size() >= twos.size();
-            while (i < singles.size() || j < twos.size())
+            
+            // Interleave while both lists have elements
+            while (i < singles.size() && j < twos.size())
             {
-                if (pick_single && i < singles.size()) out.push_back(singles[i++]);
-                else if (!pick_single && j < twos.size()) out.push_back(twos[j++]);
-                
-                pick_single = !pick_single;
-                
-                // In case one vector is exhausted, append the rest of the other
-                if (i >= singles.size() && j < twos.size()) out.insert(out.end(), twos.begin() + j, twos.end());
-                if (j >= twos.size() && i < singles.size()) out.insert(out.end(), singles.begin() + i, singles.end());
+                // Prioritize the longer list to start, for better balance
+                if (singles.size() >= twos.size()) {
+                     out.push_back(singles[i++]);
+                     if (j < twos.size()) out.push_back(twos[j++]);
+                } else {
+                     out.push_back(twos[j++]);
+                     if (i < singles.size()) out.push_back(singles[i++]);
+                }
             }
-        }
         
+            // Append the remainder of whichever list is not yet empty.
+            // Only one of these two loops will execute.
+            while (i < singles.size()) {
+                out.push_back(singles[i++]);
+            }
+            while (j < twos.size()) {
+                out.push_back(twos[j++]);
+            }
+        }        
+
         // In the TN_TAMM class
         std::string gate_to_string(const SVGate& g) {
             std::stringstream ss;
