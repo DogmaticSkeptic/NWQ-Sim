@@ -516,10 +516,10 @@ namespace NWQSim
                 }
             }
         
-            if (rank == 0) {
+//            if (rank == 0) {
                 //std::cout << "Circuit separated into " << parallel_gates.size() << " parallelizable gates and "
-                          << sequential_gates.size() << " sequential gates." << std::endl;
-            }
+  //                        << sequential_gates.size() << " sequential gates." << std::endl;
+ //           }
         
             // ************************************************************************
             // STAGE 2: Parallel Execution of Unitary Gates
