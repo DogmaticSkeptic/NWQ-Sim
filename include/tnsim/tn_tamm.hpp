@@ -348,9 +348,10 @@ namespace NWQSim
         }
         
         
+        // In the TN_TAMM class
         void place_c1(const SVGate& s,
                       std::vector<std::vector<SVGate>>& layers,
-                      std::map<int,int>& last_layer_map)
+                      std::map<int,int>& last_layer_map) // CHANGED: from std::unordered_map
         {
             int q = s.qubit;
             // Determine the earliest possible layer based on data dependency
@@ -373,11 +374,12 @@ namespace NWQSim
                 // Conflict found, try the next layer
                 L++;
             }
-        }
-        
+        } 
+
+        // In the TN_TAMM class
         void place_c2(const SVGate& t, int a, int b,
                       std::vector<std::vector<SVGate>>& layers,
-                      std::map<int,int>& last_layer_map)
+                      std::map<int,int>& last_layer_map) // CHANGED: from std::unordered_map
         {
             // Determine the earliest possible layer based on data dependencies
             int L = 1 + std::max(last_layer_map[a], last_layer_map[b]);
@@ -449,6 +451,7 @@ namespace NWQSim
         IdxType* result = nullptr;
         CuCtx cu_ctx_;
 
+        // In the TN_TAMM class
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
@@ -495,12 +498,11 @@ namespace NWQSim
         
             // ************************************************************************
             // PASS 2: Layer the flat, nearest-neighbor circuit.
-            // The loop now only needs to handle C1 and C2 because that's all that's left.
             // ************************************************************************
             std::vector<std::vector<SVGate>> layers;
             layers.reserve(flat_gates.size());
+            // CHANGED: Use std::map to guarantee deterministic ordering.
             std::map<int,int> last_layer_map;
-            last_layer_map.reserve(this->n_qubits);
         
             for (const auto& g : flat_gates) {
                 if (g.op_name == OP::C1) {
@@ -512,8 +514,7 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] simulation_kernel: Pass 2 (Layering) complete. Created " << layers.size() << " layers." << std::endl;
         
             // ************************************************************************
-            // DIAGNOSTIC CHECK: This check is now sufficient because we know only
-            // C1 and C2 gates exist in the layers.
+            // DIAGNOSTIC CHECK
             // ************************************************************************
             for (size_t i = 0; i < layers.size(); ++i) {
                 const auto& layer = layers[i];
