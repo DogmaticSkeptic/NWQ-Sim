@@ -476,38 +476,46 @@ namespace NWQSim
         IdxType* result = nullptr;
         CuCtx cu_ctx_;
 
-        // In the TN_TAMM class
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
-            int nproc = pg.size().value();
             std::cout << "[RANK " << rank << "] ==> Entering simulation_kernel." << std::endl;
         
-            // PASS 1: Decompose gates.
+            // PASS 1: Decompose all gates into a single, flat list of nearest-neighbor gates.
             std::vector<SVGate> flat_gates;
             flat_gates.reserve(gates.size() * 2);
+        
             for (const auto& g : gates) {
                 if (g.op_name == OP::C1 || g.op_name == OP::C2) {
                     if (g.op_name == OP::C1) {
                         flat_gates.push_back(g);
-                    } else {
+                    } else { // It must be OP::C2
                         int a = g.ctrl;
                         int b = g.qubit;
+        
                         if (std::abs(a - b) > 1) {
                             bool reversed = a > b;
                             if (reversed) std::swap(a, b);
-                            for (int k = a; k < b - 1; ++k) flat_gates.push_back(make_swap_sv(k, k + 1));
-                            if (reversed) flat_gates.push_back(make_local_c2_sv(g, b, b - 1));
-                            else flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
-                            for (int k = b - 2; k >= a; --k) flat_gates.push_back(make_swap_sv(k, k + 1));
+        
+                            for (int k = a; k < b - 1; ++k) {
+                                flat_gates.push_back(make_swap_sv(k, k + 1));
+                            }
+                            if (reversed) {
+                                flat_gates.push_back(make_local_c2_sv(g, b, b - 1));
+                            } else {
+                                flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
+                            }
+                            for (int k = b - 2; k >= a; --k) {
+                                flat_gates.push_back(make_swap_sv(k, k + 1));
+                            }
                         } else {
                             flat_gates.push_back(g);
                         }
                     }
                 }
             }
-        
-            // PASS 2: Layer the circuit.
+            
+            // PASS 2: Layer the flat, nearest-neighbor circuit.
             std::vector<std::vector<SVGate>> layers;
             layers.reserve(flat_gates.size());
             std::map<int, int> last_layer_map; // Using std::map for deterministic scheduling
@@ -520,31 +528,12 @@ namespace NWQSim
                 }
             }
             
-            pg.barrier(); // Sync after all ranks finish scheduling.
+            pg.barrier(); 
         
             // EXECUTION
             int layer_idx = 0;
             for (const auto& layer : layers)
             {
-                // --------------------------------------------------------------------
-                // NEW DIAGNOSTIC PRINTING BLOCK
-                // Each rank will print the contents of the *current* layer before executing it.
-                // The barriers ensure the output is clean and ordered by rank.
-                // --------------------------------------------------------------------
-                pg.barrier();
-                for (int i = 0; i < nproc; ++i) {
-                    if (rank == i) {
-                        std::cout << "[RANK " << rank << "] Schedule for Layer " << layer_idx << ": ";
-                        for (const auto& gate : layer) {
-                            std::cout << gate_to_string(gate) << " ";
-                        }
-                        std::cout << std::endl;
-                        std::cout.flush();
-                    }
-                    pg.barrier();
-                }
-                // --------------------------------------------------------------------
-        
                 if (layer.empty()) {
                     layer_idx++;
                     continue;
@@ -552,9 +541,9 @@ namespace NWQSim
         
                 std::cout << "[RANK " << rank << "] simulation_kernel: ---------- STARTING LAYER " << layer_idx << " ----------" << std::endl;
         
-                std::vector<SVGate> batch;
-                batch.reserve(layer.size());
-                append_round_robin(layer, batch);
+                // CHANGED: Removed the call to append_round_robin.
+                // The batch is now just a direct copy of the layer. This is simpler and guarantees correctness.
+                std::vector<SVGate> batch = layer;
         
                 auto local_update_results = run_gates_parallel(batch);
                 
