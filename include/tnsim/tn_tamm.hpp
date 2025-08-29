@@ -459,44 +459,44 @@ namespace NWQSim
             // PASS 1: Decompose all gates into a single, flat list of nearest-neighbor gates.
             // ************************************************************************
             std::vector<SVGate> flat_gates;
-            flat_gates.reserve(gates.size() * 2); // Pre-allocate with a reasonable guess
+            flat_gates.reserve(gates.size() * 2);
         
             for (const auto& g : gates) {
-                if (g.op_name == OP::C1) {
-                    flat_gates.push_back(g);
-                } else if (g.op_name == OP::C2) {
-                    int a = g.ctrl;
-                    int b = g.qubit;
-        
-                    if (std::abs(a - b) > 1) {
-                        bool reversed = a > b;
-                        if (reversed) std::swap(a, b);
-        
-                        // Forward SWAPs to bring qubits adjacent
-                        for (int k = a; k < b - 1; ++k) {
-                            flat_gates.push_back(make_swap_sv(k, k + 1));
-                        }
-                        // The actual C2 gate, now on adjacent qubits
-                        if (reversed) {
-                            flat_gates.push_back(make_local_c2_sv(g, b, b - 1));
-                        } else {
-                            flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
-                        }
-                        // Backward SWAPs to return qubits to original positions
-                        for (int k = b - 2; k >= a; --k) {
-                            flat_gates.push_back(make_swap_sv(k, k + 1));
-                        }
-                    } else {
-                        // It's already a nearest-neighbor gate.
+                if (g.op_name == OP::C1 || g.op_name == OP::C2) { // Process only C1 and C2 from the start
+                    if (g.op_name == OP::C1) {
                         flat_gates.push_back(g);
+                    } else { // It must be OP::C2
+                        int a = g.ctrl;
+                        int b = g.qubit;
+        
+                        if (std::abs(a - b) > 1) {
+                            bool reversed = a > b;
+                            if (reversed) std::swap(a, b);
+        
+                            for (int k = a; k < b - 1; ++k) {
+                                flat_gates.push_back(make_swap_sv(k, k + 1));
+                            }
+                            if (reversed) {
+                                flat_gates.push_back(make_local_c2_sv(g, b, b - 1));
+                            } else {
+                                flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
+                            }
+                            for (int k = b - 2; k >= a; --k) {
+                                flat_gates.push_back(make_swap_sv(k, k + 1));
+                            }
+                        } else {
+                            flat_gates.push_back(g);
+                        }
                     }
                 }
+                // Any other gate type is now explicitly ignored and will not enter flat_gates.
             }
-            std::cout << "[RANK " << rank << "] simulation_kernel: Pass 1 (Decomposition) complete. Original gates: " << gates.size() << ", Flat nearest-neighbor gates: " << flat_gates.size() << "." << std::endl;
+            std::cout << "[RANK " << rank << "] simulation_kernel: Pass 1 (Decomposition) complete. Original gates: " << gates.size() << ", Flat C1/C2 gates: " << flat_gates.size() << "." << std::endl;
         
         
             // ************************************************************************
-            // PASS 2: Layer the flat, nearest-neighbor circuit using the robust algorithm.
+            // PASS 2: Layer the flat, nearest-neighbor circuit.
+            // The loop now only needs to handle C1 and C2 because that's all that's left.
             // ************************************************************************
             std::vector<std::vector<SVGate>> layers;
             layers.reserve(flat_gates.size());
@@ -506,16 +506,15 @@ namespace NWQSim
             for (const auto& g : flat_gates) {
                 if (g.op_name == OP::C1) {
                     place_c1(g, layers, last_layer_map);
-                } else if (g.op_name == OP::C2) {
-                    // All C2 gates are now guaranteed to be nearest-neighbor
+                } else { // It can only be OP::C2
                     place_c2(g, g.ctrl, g.qubit, layers, last_layer_map);
                 }
             }
             std::cout << "[RANK " << rank << "] simulation_kernel: Pass 2 (Layering) complete. Created " << layers.size() << " layers." << std::endl;
         
             // ************************************************************************
-            // DIAGNOSTIC CHECK: Verify that no layer has conflicting gates.
-            // THIS TIME IT MUST PASS.
+            // DIAGNOSTIC CHECK: This check is now sufficient because we know only
+            // C1 and C2 gates exist in the layers.
             // ************************************************************************
             for (size_t i = 0; i < layers.size(); ++i) {
                 const auto& layer = layers[i];
