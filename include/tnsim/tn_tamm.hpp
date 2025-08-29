@@ -476,86 +476,136 @@ namespace NWQSim
         IdxType* result = nullptr;
         CuCtx cu_ctx_;
 
+        // In the TN_TAMM class
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
             std::cout << "[RANK " << rank << "] ==> Entering simulation_kernel." << std::endl;
         
-            // PASS 1: Decompose all gates into a single, flat list of nearest-neighbor gates.
-            std::vector<SVGate> flat_gates;
-            flat_gates.reserve(gates.size() * 2);
-        
+            // ************************************************************************
+            // STAGE 1: Gate Sorting
+            // Separate the circuit into parallelizable unitary gates and sequential non-unitary gates.
+            // ************************************************************************
+            std::vector<SVGate> parallel_gates;
+            std::vector<SVGate> sequential_gates;
             for (const auto& g : gates) {
                 if (g.op_name == OP::C1 || g.op_name == OP::C2) {
+                    parallel_gates.push_back(g);
+                } else if (g.op_name == OP::M || g.op_name == OP::MA || g.op_name == OP::RESET) {
+                    sequential_gates.push_back(g);
+                } else {
+                    // It's good practice to handle unknown gates.
+                    if (rank == 0) {
+                        std::cout << "Warning: Unrecognized gate type encountered and ignored." << std::endl;
+                    }
+                }
+            }
+        
+            if (rank == 0) {
+                std::cout << "Circuit separated into " << parallel_gates.size() << " parallelizable gates and "
+                          << sequential_gates.size() << " sequential gates." << std::endl;
+            }
+        
+        
+            // ************************************************************************
+            // STAGE 2: Parallel Execution of Unitary Gates
+            // This section contains the logic we've already debugged.
+            // ************************************************************************
+            if (!parallel_gates.empty()) {
+                // PASS 1: Decompose gates.
+                std::vector<SVGate> flat_gates;
+                flat_gates.reserve(parallel_gates.size() * 2);
+                for (const auto& g : parallel_gates) {
                     if (g.op_name == OP::C1) {
                         flat_gates.push_back(g);
                     } else { // It must be OP::C2
                         int a = g.ctrl;
                         int b = g.qubit;
-        
                         if (std::abs(a - b) > 1) {
                             bool reversed = a > b;
                             if (reversed) std::swap(a, b);
-        
-                            for (int k = a; k < b - 1; ++k) {
-                                flat_gates.push_back(make_swap_sv(k, k + 1));
-                            }
-                            if (reversed) {
-                                flat_gates.push_back(make_local_c2_sv(g, b, b - 1));
-                            } else {
-                                flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
-                            }
-                            for (int k = b - 2; k >= a; --k) {
-                                flat_gates.push_back(make_swap_sv(k, k + 1));
-                            }
+                            for (int k = a; k < b - 1; ++k) flat_gates.push_back(make_swap_sv(k, k + 1));
+                            if (reversed) flat_gates.push_back(make_local_c2_sv(g, b, b - 1));
+                            else flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
+                            for (int k = b - 2; k >= a; --k) flat_gates.push_back(make_swap_sv(k, k + 1));
                         } else {
                             flat_gates.push_back(g);
                         }
                     }
                 }
-            }
-            
-            // PASS 2: Layer the flat, nearest-neighbor circuit.
-            std::vector<std::vector<SVGate>> layers;
-            layers.reserve(flat_gates.size());
-            std::map<int, int> last_layer_map; // Using std::map for deterministic scheduling
         
-            for (const auto& g : flat_gates) {
-                if (g.op_name == OP::C1) {
-                    place_c1(g, layers, last_layer_map);
-                } else {
-                    place_c2(g, g.ctrl, g.qubit, layers, last_layer_map);
+                // PASS 2: Layer the circuit.
+                std::vector<std::vector<SVGate>> layers;
+                layers.reserve(flat_gates.size());
+                std::map<int, int> last_layer_map; // Using std::map for deterministic scheduling
+        
+                for (const auto& g : flat_gates) {
+                    if (g.op_name == OP::C1) {
+                        place_c1(g, layers, last_layer_map);
+                    } else {
+                        place_c2(g, g.ctrl, g.qubit, layers, last_layer_map);
+                    }
                 }
-            }
-            
-            pg.barrier(); 
+                
+                pg.barrier(); 
         
-            // EXECUTION
-            int layer_idx = 0;
-            for (const auto& layer : layers)
-            {
-                if (layer.empty()) {
+                // EXECUTION of layers
+                int layer_idx = 0;
+                for (const auto& layer : layers) {
+                    if (layer.empty()) {
+                        layer_idx++;
+                        continue;
+                    }
+                    if (rank == 0) std::cout << "Starting parallel layer " << layer_idx << std::endl;
+                    
+                    std::vector<SVGate> batch = layer; // No round-robin for simplicity and correctness
+                    auto local_update_results = run_gates_parallel(batch);
+                    pg.barrier();
+                    apply_collective_updates(local_update_results);
+                    pg.barrier();
+                    
+                    if (rank == 0) std::cout << "Finished parallel layer " << layer_idx << std::endl;
                     layer_idx++;
-                    continue;
                 }
-        
-                std::cout << "[RANK " << rank << "] simulation_kernel: ---------- STARTING LAYER " << layer_idx << " ----------" << std::endl;
-        
-                // CHANGED: Removed the call to append_round_robin.
-                // The batch is now just a direct copy of the layer. This is simpler and guarantees correctness.
-                std::vector<SVGate> batch = layer;
-        
-                auto local_update_results = run_gates_parallel(batch);
-                
-                pg.barrier();
-        
-                apply_collective_updates(local_update_results);
-                
-                pg.barrier();
-        
-                std::cout << "[RANK " << rank << "] simulation_kernel: ---------- FINISHED LAYER " << layer_idx << " ----------" << std::endl;
-                layer_idx++;
             }
+        
+        
+            // ************************************************************************
+            // STAGE 3: Sequential Execution of Non-Unitary Gates
+            // All ranks must participate, as some of these operations (like MA_GATE) are collective.
+            // ************************************************************************
+            pg.barrier(); // Ensure all parallel work is finished before starting this stage.
+            
+            if (rank == 0 && !sequential_gates.empty()) {
+                std::cout << "---------- STARTING SEQUENTIAL GATES ----------" << std::endl;
+            }
+        
+            for (const auto &g : sequential_gates)
+            {
+                if (g.op_name == OP::RESET)
+                {
+                    if (rank == 0) std::cout << "Executing RESET on qubit " << g.qubit << std::endl;
+                    RESET_GATE(g.qubit);
+                }
+                else if (g.op_name == OP::M)
+                {
+                    if (rank == 0) std::cout << "Executing M on qubit " << g.qubit << std::endl;
+                    M_GATE(g.qubit);
+                }
+                else if (g.op_name == OP::MA)
+                {
+                    if (rank == 0) std::cout << "Executing MA on all qubits." << std::endl;
+                    // The argument to MA_GATE is likely a placeholder for repetitions,
+                    // which seems to be 1 in this context.
+                    MA_GATE(g.qubit); 
+                }
+            }
+        
+            if (rank == 0 && !sequential_gates.empty()) {
+                std::cout << "---------- FINISHED SEQUENTIAL GATES ----------" << std::endl;
+            }
+        
+            pg.barrier(); // Final sync after all operations.
             std::cout << "[RANK " << rank << "] <== Exiting simulation_kernel." << std::endl;
         }
 
@@ -688,6 +738,7 @@ namespace NWQSim
             return all_metadata;
         }
 
+        // In the TN_TAM_class
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
@@ -697,81 +748,80 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
         
             tamm::Scheduler sch_global{ec};
-            int local_result_idx = 0;
-        
-            // This vector will hold the new tensor objects. We need to keep them
-            // in scope until after the scheduler has executed the puts.
-            std::vector<tamm::Tensor<Cplx>> new_tensors;
-            new_tensors.reserve(all_metadata.size() * 2);
-        
+            
+            // --- PHASE 1: Deallocate old tensors and update bond dimension metadata ---
+            // A set to avoid duplicate deallocations if a qubit is touched multiple times (e.g., in a SWAP)
+            std::set<IdxType> deallocated_sites; 
             for (const auto& meta : all_metadata)
             {
                 if (!meta.is_valid) continue;
                 
-                IdxType q0 = meta.q0;
-                IdxType q1 = meta.q1;
+                if (deallocated_sites.find(meta.q0) == deallocated_sites.end()) {
+                    sch_global.deallocate(mps_tensors[meta.q0]);
+                    deallocated_sites.insert(meta.q0);
+                }
+                if (deallocated_sites.find(meta.q1) == deallocated_sites.end()) {
+                    sch_global.deallocate(mps_tensors[meta.q1]);
+                    deallocated_sites.insert(meta.q1);
+                }
         
-                // ALL ranks schedule deallocation of old global tensors.
-                sch_global.deallocate(mps_tensors[q0], mps_tensors[q1]);
-        
-                // ALL ranks update their local description of the MPS structure.
-                bond_dims[q0 + 1] = meta.new_bond_dim;
+                // Update the bond dimension state for the next layer
+                bond_dims[meta.q0 + 1] = meta.new_bond_dim;
                 tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
-                bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
-        
-                // ALL ranks create new tensor handles and schedule their allocation.
-                // We store them in the `new_tensors` vector to keep them alive.
-                new_tensors.emplace_back(tamm::Tensor<Cplx>{bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
-                new_tensors.emplace_back(tamm::Tensor<Cplx>{bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
-                
-                auto& new_T0 = new_tensors[new_tensors.size() - 2];
-                auto& new_T1 = new_tensors[new_tensors.size() - 1];
-        
-                new_T0.set_dense();
-                new_T1.set_dense();
-                sch_global.allocate(new_T0, new_T1);
+                bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
             }
         
-            // A barrier here is good practice to ensure all ranks have finished
-            // scheduling before anyone starts executing or putting data.
-            pg.barrier();
+            // --- PHASE 2: Allocate new tensors with the now-consistent dimensions ---
+            std::vector<tamm::Tensor<Cplx>> new_tensors;
+            new_tensors.reserve(deallocated_sites.size());
         
-            // ALL ranks execute the deallocations and allocations collectively.
+            // Use a map to create only one new tensor per site.
+            std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
+        
+            for(const auto& site : deallocated_sites) {
+                site_to_new_tensor.emplace(
+                    site,
+                    tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]}
+                );
+                site_to_new_tensor.at(site).set_dense();
+                sch_global.allocate(site_to_new_tensor.at(site));
+            }
+        
+            // Execute all deallocations and allocations collectively
             std::cout << "[RANK " << rank << "] apply_collective_updates: Executing deallocations and allocations..." << std::endl;
             sch_global.execute(exec_hw);
             std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
         
-            // After execution, the new tensors are allocated.
-            // NOW, the source rank can directly put its data into the new tensors.
-            // Since 'put' is a blocking, one-sided communication, we don't need to schedule it.
+            // --- PHASE 3: Transfer data from compute ranks to new tensors ---
+            pg.barrier(); // Ensure allocations are visible everywhere before puts.
+        
+            int local_result_idx = 0;
             for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
+                
+                // The rank that computed the result now puts the data into the new global tensors
                 if (rank == meta.original_rank) {
                     auto& result_data = local_results[local_result_idx++];
                     assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
         
-                    // Find the correct new tensors from our list
-                    auto& new_T0_ref = new_tensors[local_result_idx*2 - 2];
-                    auto& new_T1_ref = new_tensors[local_result_idx*2 - 1];
+                    auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
+                    auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
         
-                    std::cout << "[RANK " << rank << "] apply_collective_updates: Putting data into new tensors for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
+                    std::cout << "[RANK " << rank << "] apply_collective_updates: Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
                     tamm::span<Cplx> t0_span{result_data.new_T0_data};
                     tamm::span<Cplx> t1_span{result_data.new_T1_data};
+                    
+                    // Perform the put. This is a one-sided, blocking communication.
                     new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), t0_span);
                     new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), t1_span);
                 }
             }
             
-            // Another barrier to ensure all 'put' operations are complete before
-            // the main MPS tensors are updated.
-            pg.barrier();
+            pg.barrier(); // Ensure all puts are complete.
         
-            // Finally, all ranks update their main mps_tensors array to point to the new tensors.
-            int new_tensor_idx = 0;
-            for (const auto& meta : all_metadata) {
-                 if (!meta.is_valid) continue;
-                 mps_tensors[meta.q0] = new_tensors[new_tensor_idx++];
-                 mps_tensors[meta.q1] = new_tensors[new_tensor_idx++];
+            // --- PHASE 4: Update the main MPS state with the new tensors ---
+            for(auto const& [site, new_tensor] : site_to_new_tensor) {
+                mps_tensors[site] = new_tensor;
             }
         
             std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
