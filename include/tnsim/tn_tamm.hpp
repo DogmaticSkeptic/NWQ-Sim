@@ -541,8 +541,6 @@ namespace NWQSim
             }
             if (rank == 0) std::cout << "simulation_kernel: Diagnostic check passed. All layers are conflict-free." << std::endl;
         
-            return;
-
             // ************************************************************************
             // EXECUTION: Execute the correctly formed layers.
             // ************************************************************************
