@@ -44,6 +44,9 @@
 #include <map>
 #include <cstring>
 
+#include <fstream>
+#include <iomanip>
+
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
 
@@ -244,36 +247,34 @@ namespace NWQSim
 
         void sim(std::shared_ptr<NWQSim::Circuit> circuit) override
         {
-            // prepare fused single vector gates from the circuit
             IdxType original_gate_count = circuit->num_gates();
             std::vector<SVGate> gates = fuse_circuit_sv(circuit);
             IdxType fused_gate_count = gates.size();
             assert(circuit->num_qubits() == n_qubits);
         
-            // Barrier to synchronize all ranks before starting the timer
             pg.barrier();
-        
-            // Start the timer
             auto start_time = std::chrono::high_resolution_clock::now();
-        
-            // execute the simulation kernel
             simulation_kernel(gates);
-        
-            // Stop the timer
             auto end_time = std::chrono::high_resolution_clock::now();
-            
-            // Barrier to ensure all ranks have finished the kernel before printing
             pg.barrier();
         
-            // Calculate the duration in seconds
             std::chrono::duration<double> elapsed_seconds = end_time - start_time;
         
-            // Print the elapsed time only from the root process (rank 0)
             if (pg.rank().value() == 0) {
-                std::cout << "simulation_kernel execution time: " 
+                std::cout << "simulation_kernel execution time: "
                           << elapsed_seconds.count() << " seconds." << std::endl;
+        
+                std::ofstream csv_file("timings.csv", std::ios::app);
+                if (csv_file.is_open()) {
+                    csv_file << std::fixed << std::setprecision(6)
+                             << elapsed_seconds.count() << "\n";
+                    csv_file.close();
+                } else {
+                    std::cerr << "Error: Unable to open timings.csv for writing." << std::endl;
+                }
             }
         }
+
 
         IdxType* get_results() override
         {
