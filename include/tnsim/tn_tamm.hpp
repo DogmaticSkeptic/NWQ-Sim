@@ -318,15 +318,11 @@ namespace NWQSim
     
         static SVGate make_local_c2_sv(const SVGate& g, int left, int right)
         {
-            // CORRECTED: Use the copy constructor to create 't' as a copy of 'g'.
             SVGate t(g); 
         
-            // Now, simply modify the fields that need to be different.
             t.ctrl = left;
             t.qubit = right;
             
-            // The gm_real and gm_imag are already correct because they were copied from g.
-            // No memcpy is needed here.
             return t;
         }
     
@@ -610,71 +606,78 @@ namespace NWQSim
         }
 
         // In the TN_TAMM class
-        std::vector<LocalGateResult> run_gates_parallel(const std::vector<SVGate>& batch)
+        std::vector<LocalGateResult> TN_TAMM::run_gates_parallel(const std::vector<SVGate>& batch)
         {
             int rank = pg.rank().value();
-            int nproc = pg.size().value();
-            std::cout << "[RANK " << rank << "] >> Entering run_gates_parallel" << std::endl;
+            if (rank == 0) {
+                std::cout << ">> Starting parallel execution of a layer with " << batch.size() << " gates." << std::endl;
+            }
         
+            // This is the distributed atomic counter. Each rank will fetch-and-add
+            // to get a unique gate index, ensuring each gate in the batch is
+            // processed exactly once across all ranks.
             tamm::AtomicCounterGA gate_counter(pg, 1);
             gate_counter.allocate(0);
             pg.barrier();
         
             std::vector<LocalGateResult> local_results;
         
-            // Use a distributed set to track which gates have been "claimed" for computation.
-            // This is a simplified approach; a more advanced one would use a proper distributed hash table.
-            // For this purpose, we can use an array of atomics where each index corresponds to a gate index.
-            std::vector<std::atomic<bool>> gate_claimed(batch.size());
-            for(size_t i = 0; i < batch.size(); ++i) {
-                gate_claimed[i].store(false);
-            }
-        
             while (true)
             {
+                // Atomically get the next available gate index from the distributed counter.
                 long long gate_idx = gate_counter.fetch_add(0, 1);
         
+                // If the index is out of bounds, all gates have been claimed. Exit the loop.
                 if (gate_idx >= static_cast<long long>(batch.size())) {
                     break;
                 }
         
                 const SVGate& g = batch[gate_idx];
-                
-                // This logic is a placeholder for a true distributed lock.
-                // It relies on the fact that all ranks will eventually see the update.
-                // A more robust solution might require MPI communication to claim a gate.
-                bool already_claimed = gate_claimed[gate_idx].exchange(true);
-                if (already_claimed) {
-                    continue; // Another rank is already handling this gate.
-                }
-        
         
                 if (g.op_name == OP::C1) {
-                    std::cout << "[RANK " << rank << "] run_gates_parallel: Gate " << gate_idx << " is a C1 gate on qubit " << g.qubit << "." << std::endl;
-                    
-                    auto& tensor_to_update = mps_tensors[g.qubit];
-                    auto [owner_proc, offset] = tensor_to_update.distribution().locate(*(tensor_to_update.loop_nest().begin()));
-                    
-                    std::cout << "[RANK " << rank << "] run_gates_parallel: Qubit " << g.qubit << " is owned by rank " << owner_proc.value() << ". Dispatching work." << std::endl;
+                    // STRATEGY for C1 GATES: In-place update by the owner.
+                    // The rank that owns the tensor data for the target qubit will perform the update directly.
+                    // No result needs to be returned, as the update is applied immediately.
         
+                    auto& tensor_to_update = mps_tensors[g.qubit];
+                    
+                    // Find which process owns the data for this tensor.
+                    // We only need to check the first block since our tensors are not distributed block-wise.
+                    auto [owner_proc, offset] = tensor_to_update.distribution().locate(*(tensor_to_update.loop_nest().begin()));
+        
+                    // Only the owner rank performs the computation.
                     if (pg.rank() == owner_proc) {
-                         std::array<Cplx, 4> U;
-                         for (int i=0; i<4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
-                         C1_GATE_local_kernel(tensor_to_update, U);
+                        // std::cout << "[RANK " << rank << "] Applying C1 gate on qubit " << g.qubit << " (owned locally)." << std::endl;
+                        std::array<Cplx, 4> U;
+                        for (int i = 0; i < 4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
+                        C1_GATE_local_kernel(tensor_to_update, U);
                     }
         
                 } else if (g.op_name == OP::C2) {
-                    std::cout << "[RANK " << rank << "] run_gates_parallel: Gate " << gate_idx << " is a C2 gate on qubits (" << g.ctrl << ", " << g.qubit << "). Calling C2_GATE_COMPUTE." << std::endl;
+                    // STRATEGY for C2 GATES: Compute locally, then update collectively.
+                    // Any available rank can compute the result of the C2 gate.
+                    // The result (new tensor data) is stored in `local_results` and will be
+                    // applied to the global state in the `apply_collective_updates` function.
+                    
+                    // std::cout << "[RANK " << rank << "] Computing C2 gate on qubits (" << g.ctrl << ", " << g.qubit << ")." << std::endl;
                     std::array<Cplx, 16> U4;
-                    for (int i=0; i<16; ++i) U4[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
-                    local_results.push_back(C2_GATE_COMPUTE(U4, g.ctrl, g.qubit));
+                    for (int i = 0; i < 16; ++i) U4[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
+                    
+                    LocalGateResult result = C2_GATE_COMPUTE(U4, g.ctrl, g.qubit);
+                    if (result.is_valid) {
+                        local_results.push_back(std::move(result));
+                    }
                 }
             }
         
+            // Ensure all ranks have finished their assigned tasks before proceeding.
             pg.barrier(); 
             gate_counter.deallocate();
         
-            std::cout << "[RANK " << rank << "] << Exiting run_gates_parallel. Returning " << local_results.size() << " local C2 results." << std::endl;
+            if (rank == 0) {
+                 std::cout << "<< Finished parallel execution of layer." << std::endl;
+            }
+            
             return local_results;
         }
 
