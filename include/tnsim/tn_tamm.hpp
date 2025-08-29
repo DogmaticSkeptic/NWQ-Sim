@@ -609,9 +609,11 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] <== Exiting simulation_kernel." << std::endl;
         }
 
+        // In the TN_TAMM class
         std::vector<LocalGateResult> run_gates_parallel(const std::vector<SVGate>& batch)
         {
             int rank = pg.rank().value();
+            int nproc = pg.size().value();
             std::cout << "[RANK " << rank << "] >> Entering run_gates_parallel" << std::endl;
         
             tamm::AtomicCounterGA gate_counter(pg, 1);
@@ -620,17 +622,13 @@ namespace NWQSim
         
             std::vector<LocalGateResult> local_results;
         
-            // A flag to track if this rank was told to do work by another rank.
-            // We use an atomic for thread-safety, though with this model it's not strictly necessary.
-            std::atomic<bool> work_done_flag(false);
-        
-            // This is the function that will be executed by the owner rank.
-            auto rpc_c1_lambda = [&](const std::vector<Cplx>& U_vec, int site) {
-                std::array<Cplx, 4> U_arr;
-                std::copy_n(U_vec.begin(), 4, U_arr.begin());
-                C1_GATE_local_kernel(this->mps_tensors[site], U_arr);
-                work_done_flag.store(true);
-            };
+            // Use a distributed set to track which gates have been "claimed" for computation.
+            // This is a simplified approach; a more advanced one would use a proper distributed hash table.
+            // For this purpose, we can use an array of atomics where each index corresponds to a gate index.
+            std::vector<std::atomic<bool>> gate_claimed(batch.size());
+            for(size_t i = 0; i < batch.size(); ++i) {
+                gate_claimed[i].store(false);
+            }
         
             while (true)
             {
@@ -642,27 +640,27 @@ namespace NWQSim
         
                 const SVGate& g = batch[gate_idx];
                 
+                // This logic is a placeholder for a true distributed lock.
+                // It relies on the fact that all ranks will eventually see the update.
+                // A more robust solution might require MPI communication to claim a gate.
+                bool already_claimed = gate_claimed[gate_idx].exchange(true);
+                if (already_claimed) {
+                    continue; // Another rank is already handling this gate.
+                }
+        
+        
                 if (g.op_name == OP::C1) {
                     std::cout << "[RANK " << rank << "] run_gates_parallel: Gate " << gate_idx << " is a C1 gate on qubit " << g.qubit << "." << std::endl;
                     
-                    // Step 1: Find the owner of the tensor data.
-                    // For dense tensors, block {0,0,0...} is on rank 0, but this is not general.
-                    // A more robust way is to use the distribution object.
                     auto& tensor_to_update = mps_tensors[g.qubit];
                     auto [owner_proc, offset] = tensor_to_update.distribution().locate(*(tensor_to_update.loop_nest().begin()));
                     
                     std::cout << "[RANK " << rank << "] run_gates_parallel: Qubit " << g.qubit << " is owned by rank " << owner_proc.value() << ". Dispatching work." << std::endl;
         
-                    // Step 2: Use RPC to execute the kernel on the owner process.
-                    // We need to package the gate matrix into a std::vector to send it.
-                    std::vector<Cplx> U_vec(4);
-                    for (int i=0; i<4; ++i) U_vec[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
-        
-                    // This is a simplified RPC using TAMM's underlying UPC++/MPI.
-                    // A more complete implementation might use a dedicated RPC library.
-                    // For now, we simulate it. If this rank is the owner, it does the work.
                     if (pg.rank() == owner_proc) {
-                         C1_GATE_local_kernel(tensor_to_update, *reinterpret_cast<const std::array<Cplx, 4>*>(U_vec.data()));
+                         std::array<Cplx, 4> U;
+                         for (int i=0; i<4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
+                         C1_GATE_local_kernel(tensor_to_update, U);
                     }
         
                 } else if (g.op_name == OP::C2) {
@@ -673,9 +671,6 @@ namespace NWQSim
                 }
             }
         
-            // After the loop, ranks that might have received RPCs need to have
-            // processed them. A simple barrier ensures all one-sided communication
-            // and local work from the loop is complete.
             pg.barrier(); 
             gate_counter.deallocate();
         
