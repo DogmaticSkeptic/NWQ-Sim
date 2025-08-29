@@ -250,10 +250,30 @@ namespace NWQSim
             IdxType fused_gate_count = gates.size();
             assert(circuit->num_qubits() == n_qubits);
         
+            // Barrier to synchronize all ranks before starting the timer
+            pg.barrier();
+        
+            // Start the timer
+            auto start_time = std::chrono::high_resolution_clock::now();
+        
             // execute the simulation kernel
             simulation_kernel(gates);
+        
+            // Stop the timer
+            auto end_time = std::chrono::high_resolution_clock::now();
+            
+            // Barrier to ensure all ranks have finished the kernel before printing
+            pg.barrier();
+        
+            // Calculate the duration in seconds
+            std::chrono::duration<double> elapsed_seconds = end_time - start_time;
+        
+            // Print the elapsed time only from the root process (rank 0)
+            if (pg.rank().value() == 0) {
+                std::cout << "simulation_kernel execution time: " 
+                          << elapsed_seconds.count() << " seconds." << std::endl;
+            }
         }
-
 
         IdxType* get_results() override
         {
@@ -477,7 +497,7 @@ namespace NWQSim
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
-            if (rank == 0) std::cout << "==> Entering simulation_kernel." << std::endl;
+            //if (rank == 0) //std::cout << "==> Entering simulation_kernel." << std::endl;
         
             // ************************************************************************
             // STAGE 1: Gate Sorting
@@ -489,15 +509,15 @@ namespace NWQSim
                     parallel_gates.push_back(g);
                 } else if (g.op_name == OP::M || g.op_name == OP::MA || g.op_name == OP::RESET) {
                     sequential_gates.push_back(g);
-                } else {
-                    if (rank == 0) {
-                        std::cout << "Warning: Unrecognized gate type encountered and ignored." << std::endl;
-                    }
+                //} else {
+                   // if (rank == 0) {
+                        //std::cout << "Warning: Unrecognized gate type encountered and ignored." << std::endl;
+                   // }
                 }
             }
         
             if (rank == 0) {
-                std::cout << "Circuit separated into " << parallel_gates.size() << " parallelizable gates and "
+                //std::cout << "Circuit separated into " << parallel_gates.size() << " parallelizable gates and "
                           << sequential_gates.size() << " sequential gates." << std::endl;
             }
         
@@ -561,14 +581,14 @@ namespace NWQSim
                     if (layer.empty()) {
                         continue;
                     }
-                    if (rank == 0) std::cout << "Starting parallel layer " << layer_idx << std::endl;
+                    //if (rank == 0) //std::cout << "Starting parallel layer " << layer_idx << std::endl;
                     
                     auto local_update_results = run_gates_parallel(layer);
                     pg.barrier();
                     apply_collective_updates(local_update_results);
                     pg.barrier();
                     
-                    if (rank == 0) std::cout << "Finished parallel layer " << layer_idx << std::endl;
+                    //if (rank == 0) //std::cout << "Finished parallel layer " << layer_idx << std::endl;
                 }
             }
         
@@ -577,35 +597,35 @@ namespace NWQSim
             // ************************************************************************
             pg.barrier(); // Ensure all parallel work is finished.
             
-            if (rank == 0 && !sequential_gates.empty()) {
-                std::cout << "---------- STARTING SEQUENTIAL GATES ----------" << std::endl;
-            }
+            //if (rank == 0 && !sequential_gates.empty()) {
+                //std::cout << "---------- STARTING SEQUENTIAL GATES ----------" << std::endl;
+            //}
         
-            for (const auto &g : sequential_gates) {
-                if (g.op_name == OP::RESET) {
-                    RESET_GATE(g.qubit);
-                } else if (g.op_name == OP::M) {
-                    M_GATE(g.qubit);
-                } else if (g.op_name == OP::MA) {
-                    MA_GATE(g.qubit); 
-                }
-            }
+            //for (const auto &g : sequential_gates) {
+            //    if (g.op_name == OP::RESET) {
+            //        RESET_GATE(g.qubit);
+            //    } else if (g.op_name == OP::M) {
+            //        M_GATE(g.qubit);
+            //    } else if (g.op_name == OP::MA) {
+            //        MA_GATE(g.qubit); 
+            //    }
+            //}
         
-            if (rank == 0 && !sequential_gates.empty()) {
-                std::cout << "---------- FINISHED SEQUENTIAL GATES ----------" << std::endl;
-            }
+            //if (rank == 0 && !sequential_gates.empty()) {
+                //std::cout << "---------- FINISHED SEQUENTIAL GATES ----------" << std::endl;
+            //}
         
             pg.barrier(); // Final sync after all operations.
-            if (rank == 0) std::cout << "<== Exiting simulation_kernel." << std::endl;
+            //if (rank == 0) //std::cout << "<== Exiting simulation_kernel." << std::endl;
         }
 
         // In the TN_TAMM class
         std::vector<LocalGateResult> run_gates_parallel(const std::vector<SVGate>& batch)
         {
             int rank = pg.rank().value();
-            if (rank == 0) {
-                std::cout << ">> Starting parallel execution of a layer with " << batch.size() << " gates." << std::endl;
-            }
+            //if (rank == 0) {
+                //std::cout << ">> Starting parallel execution of a layer with " << batch.size() << " gates." << std::endl;
+            //}
         
             // This is the distributed atomic counter. Each rank will fetch-and-add
             // to get a unique gate index, ensuring each gate in the batch is
@@ -641,7 +661,7 @@ namespace NWQSim
         
                     // Only the owner rank performs the computation.
                     if (pg.rank() == owner_proc) {
-                        // std::cout << "[RANK " << rank << "] Applying C1 gate on qubit " << g.qubit << " (owned locally)." << std::endl;
+                        // //std::cout << "[RANK " << rank << "] Applying C1 gate on qubit " << g.qubit << " (owned locally)." << std::endl;
                         std::array<Cplx, 4> U;
                         for (int i = 0; i < 4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
                         C1_GATE_local_kernel(tensor_to_update, U);
@@ -653,7 +673,7 @@ namespace NWQSim
                     // The result (new tensor data) is stored in `local_results` and will be
                     // applied to the global state in the `apply_collective_updates` function.
                     
-                    // std::cout << "[RANK " << rank << "] Computing C2 gate on qubits (" << g.ctrl << ", " << g.qubit << ")." << std::endl;
+                    // //std::cout << "[RANK " << rank << "] Computing C2 gate on qubits (" << g.ctrl << ", " << g.qubit << ")." << std::endl;
                     std::array<Cplx, 16> U4;
                     for (int i = 0; i < 16; ++i) U4[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
                     
@@ -668,9 +688,9 @@ namespace NWQSim
             pg.barrier(); 
             gate_counter.deallocate();
         
-            if (rank == 0) {
-                 std::cout << "<< Finished parallel execution of layer." << std::endl;
-            }
+            //if (rank == 0) {
+                 //std::cout << "<< Finished parallel execution of layer." << std::endl;
+            //}
             
             return local_results;
         }
@@ -678,7 +698,7 @@ namespace NWQSim
         std::vector<GateUpdateMetadata> allgather_metadata(const std::vector<LocalGateResult>& local_results) 
         {
             int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] >> Entering allgather_metadata. Processing " << local_results.size() << " local results." << std::endl;
+            //std::cout << "[RANK " << rank << "] >> Entering allgather_metadata. Processing " << local_results.size() << " local results." << std::endl;
         
             // Create metadata from the raw local results
             std::vector<GateUpdateMetadata> local_metadata;
@@ -694,7 +714,7 @@ namespace NWQSim
                     });
                 }
             }
-            std::cout << "[RANK " << rank << "] allgather_metadata: Created " << local_metadata.size() << " local metadata entries." << std::endl;
+            //std::cout << "[RANK " << rank << "] allgather_metadata: Created " << local_metadata.size() << " local metadata entries." << std::endl;
         
             // The rest of the function is a collective communication and remains the same.
             int local_size_bytes = local_metadata.size() * sizeof(GateUpdateMetadata);
@@ -722,11 +742,11 @@ namespace NWQSim
                                displacements_bytes.data(),
                                MPI_BYTE,
                                pg.comm());
-            } else {
-                 std::cout << "[RANK " << rank << "] allgather_metadata: No metadata to gather." << std::endl;
-            }
+            } //else {
+                 //std::cout << "[RANK " << rank << "] allgather_metadata: No metadata to gather." << std::endl;
+            //}
         
-            std::cout << "[RANK " << rank << "] << Exiting allgather_metadata. Total metadata entries gathered: " << all_metadata.size() << std::endl;
+            //std::cout << "[RANK " << rank << "] << Exiting allgather_metadata. Total metadata entries gathered: " << all_metadata.size() << std::endl;
             return all_metadata;
         }
 
@@ -734,10 +754,10 @@ namespace NWQSim
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
+            //std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
         
             auto all_metadata = allgather_metadata(local_results);
-            std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
+            //std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
         
             tamm::Scheduler sch_global{ec};
             
@@ -780,9 +800,9 @@ namespace NWQSim
             }
         
             // Execute all deallocations and allocations collectively
-            std::cout << "[RANK " << rank << "] apply_collective_updates: Executing deallocations and allocations..." << std::endl;
+            //std::cout << "[RANK " << rank << "] apply_collective_updates: Executing deallocations and allocations..." << std::endl;
             sch_global.execute(exec_hw);
-            std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
+            //std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
         
             // --- PHASE 3: Transfer data from compute ranks to new tensors ---
             pg.barrier(); // Ensure allocations are visible everywhere before puts.
@@ -799,7 +819,7 @@ namespace NWQSim
                     auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
                     auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
         
-                    std::cout << "[RANK " << rank << "] apply_collective_updates: Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
+                    //std::cout << "[RANK " << rank << "] apply_collective_updates: Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
                     tamm::span<Cplx> t0_span{result_data.new_T0_data};
                     tamm::span<Cplx> t1_span{result_data.new_T1_data};
                     
@@ -816,7 +836,7 @@ namespace NWQSim
                 mps_tensors[site] = new_tensor;
             }
         
-            std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
+            //std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
 
         // This function is now a "local kernel". It will be called via RPC
@@ -943,7 +963,7 @@ namespace NWQSim
             std::vector<Cplx>& VT_row)
         {
             int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] ---> gpu_svd_jacobi: Entered. Matrix dimensions (m, n): (" << m << ", " << n << ")." << std::endl;
+            //std::cout << "[RANK " << rank << "] ---> gpu_svd_jacobi: Entered. Matrix dimensions (m, n): (" << m << ", " << n << ")." << std::endl;
 
             cusolverDnXgesvdjSetTolerance(cu_ctx_.jp, 1e-14);
             cusolverDnXgesvdjSetMaxSweeps(cu_ctx_.jp, 100);
@@ -960,53 +980,53 @@ namespace NWQSim
             cuDoubleComplex* d_V = nullptr;
             int* d_info = nullptr;
 
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Allocating GPU memory for A, S, U, V, info." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Allocating GPU memory for A, S, U, V, info." << std::endl;
             cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * (size_t)lda * (size_t)n);
             cudaMalloc((void**)&d_S, sizeof(double) * (size_t)k);
             cudaMalloc((void**)&d_U, sizeof(cuDoubleComplex) * (size_t)ldu * (size_t)k);
             cudaMalloc((void**)&d_V, sizeof(cuDoubleComplex) * (size_t)ldv * (size_t)k);
             cudaMalloc((void**)&d_info, sizeof(int));
 
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Copying host matrix A to device." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Copying host matrix A to device." << std::endl;
             cudaMemcpyAsync(d_A, reinterpret_cast<const cuDoubleComplex*>(A_h),
                             sizeof(cuDoubleComplex) * (size_t)lda * (size_t)n,
                             cudaMemcpyHostToDevice, cu_ctx_.stream);
 
             int lwork_req = 0;
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Querying buffer size for Zgesvdj." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Querying buffer size for Zgesvdj." << std::endl;
             cusolverDnZgesvdj_bufferSize(cu_ctx_.solver, CUSOLVER_EIG_MODE_VECTOR, econ,
                                          m, n, d_A, lda, d_S, d_U, ldu, d_V, ldv,
                                          &lwork_req, cu_ctx_.jp);
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Required buffer size (lwork_req): " << lwork_req << "." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Required buffer size (lwork_req): " << lwork_req << "." << std::endl;
 
             if (lwork_req > cu_ctx_.lwork_jac) {
-                std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Reallocating GPU workspace from " << cu_ctx_.lwork_jac << " to " << lwork_req << "." << std::endl;
+                //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Reallocating GPU workspace from " << cu_ctx_.lwork_jac << " to " << lwork_req << "." << std::endl;
                 if (cu_ctx_.d_work_jac) cudaFree(cu_ctx_.d_work_jac);
                 cu_ctx_.lwork_jac = lwork_req;
                 cudaMalloc((void**)&cu_ctx_.d_work_jac, sizeof(cuDoubleComplex) * (size_t)cu_ctx_.lwork_jac);
             }
 
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Calling cusolverDnZgesvdj to perform SVD on GPU..." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Calling cusolverDnZgesvdj to perform SVD on GPU..." << std::endl;
             cusolverDnZgesvdj(cu_ctx_.solver, CUSOLVER_EIG_MODE_VECTOR, econ,
                               m, n, d_A, lda, d_S, d_U, ldu, d_V, ldv,
                               reinterpret_cast<cuDoubleComplex*>(cu_ctx_.d_work_jac),
                               cu_ctx_.lwork_jac, d_info, cu_ctx_.jp);
 
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Synchronizing CUDA stream..." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Synchronizing CUDA stream..." << std::endl;
             cudaStreamSynchronize(cu_ctx_.stream);
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Stream synchronized. GPU computation finished." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Stream synchronized. GPU computation finished." << std::endl;
 
             S.resize((size_t)k);
             std::vector<Cplx> U_col((size_t)ldu * (size_t)k);
             std::vector<Cplx> V_col((size_t)ldv * (size_t)k);
 
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Copying results S, U, V from device to host." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Copying results S, U, V from device to host." << std::endl;
             cudaMemcpy(S.data(), d_S, sizeof(double) * (size_t)k, cudaMemcpyDeviceToHost);
             cudaMemcpy(U_col.data(), d_U, sizeof(Cplx) * (size_t)ldu * (size_t)k, cudaMemcpyDeviceToHost);
             cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * (size_t)ldv * (size_t)k, cudaMemcpyDeviceToHost);
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: D2H copy complete." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: D2H copy complete." << std::endl;
 
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Transposing U and V to row-major format." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Transposing U and V to row-major format." << std::endl;
             U_row.resize((size_t)m * (size_t)k);
             for (int i = 0; i < m; ++i)
                 for (int j = 0; j < k; ++j)
@@ -1017,14 +1037,14 @@ namespace NWQSim
                 for (int j = 0; j < n; ++j)
                     VT_row[(size_t)i * (size_t)n + (size_t)j] = std::conj(V_col[(size_t)j + (size_t)i * (size_t)ldv]);
 
-            std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Freeing GPU memory." << std::endl;
+            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Freeing GPU memory." << std::endl;
             cudaFree(d_info);
             cudaFree(d_V);
             cudaFree(d_U);
             cudaFree(d_S);
             cudaFree(d_A);
 
-            std::cout << "[RANK " << rank << "] <--- gpu_svd_jacobi: Exiting." << std::endl;
+            //std::cout << "[RANK " << rank << "] <--- gpu_svd_jacobi: Exiting." << std::endl;
         }
 
 //        IdxType local_svd_and_reconstruct_data(
@@ -1034,7 +1054,7 @@ namespace NWQSim
 //            IdxType q0, IdxType q1)
 //        {
 //            int rank = pg.rank().value();
-//            std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data (EIGEN): Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
+//            //std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data (EIGEN): Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
 //        
 //            // 1. Extract dimensions from the input tensor
 //            const IdxType phys_dim = 2;
@@ -1061,12 +1081,12 @@ namespace NWQSim
 //                    }
 //                }
 //            }
-//            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Reshape to Eigen matrix complete." << std::endl;
+//            //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Reshape to Eigen matrix complete." << std::endl;
 //            
 //            // 3. Compute the SVD using Eigen's robust BDCSVD.
 //            Eigen::BDCSVD<decltype(mat)> svd(mat, Eigen::ComputeThinU | Eigen::ComputeThinV);
 //            auto svals = svd.singularValues();
-//            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): SVD computation complete." << std::endl;
+//            //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): SVD computation complete." << std::endl;
 //        
 //            // 4. Truncate based on singular value cutoff and max bond dimension.
 //            std::vector<IdxType> keep;
@@ -1081,7 +1101,7 @@ namespace NWQSim
 //            if (chi == 0 && svals.size() > 0) {
 //                chi = 1; // Prevent bond dimension from ever becoming zero.
 //            }
-//            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
+//            //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
 //        
 //            // 5. Extract the truncated U, S, and Vh matrices.
 //            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat(mat.rows(), chi);
@@ -1119,7 +1139,7 @@ namespace NWQSim
 //                }
 //            }
 //        
-//            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data (EIGEN): Exiting." << std::endl;
+//            //std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data (EIGEN): Exiting." << std::endl;
 //            return chi;
 //        }
 
@@ -1131,7 +1151,7 @@ namespace NWQSim
             IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
+            //std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
         
             const IdxType phys_dim = 2;
             IdxType Dl = M2_local.tiled_index_spaces()[0].index_space().num_indices();
@@ -1155,7 +1175,7 @@ namespace NWQSim
                 size_t col = p1 * Dr + r;
                 M2_col_major[row + col * m] = M2_hostbuf[c];
             }
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Reshape complete." << std::endl;
+            //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Reshape complete." << std::endl;
         
             // Perform the SVD on the GPU.
             std::vector<double> S;
@@ -1174,7 +1194,7 @@ namespace NWQSim
             if (chi == 0) {
                 chi = 1; // Prevent bond dimension from becoming zero.
             }
-            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
+            //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
         
             // Populate the output vectors with the data for the new tensors.
             Ti_new_data.resize(Dl * phys_dim * chi);
@@ -1195,7 +1215,7 @@ namespace NWQSim
                 Tj_new_data[c] = Cplx(S[keep[b]], 0.0) * VT_row[keep[b] * n + (p1 * Dr + r)];
             }
         
-            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data: Exiting." << std::endl;
+            //std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data: Exiting." << std::endl;
             return chi;
         }
 
