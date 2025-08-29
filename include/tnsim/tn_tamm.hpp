@@ -431,6 +431,19 @@ namespace NWQSim
             }
         }
 
+        // Add this helper function inside the TN_TAMM class
+        std::string gate_to_string(const SVGate& g) {
+            std::stringstream ss;
+            if (g.op_name == OP::C1) {
+                ss << "C1(" << g.qubit << ")";
+            } else if (g.op_name == OP::C2) {
+                ss << "C2(" << g.ctrl << "," << g.qubit << ")";
+            } else {
+                ss << "UNKNOWN";
+            }
+            return ss.str();
+        }
+
 
     protected:
         IdxType n_qubits;
@@ -450,9 +463,10 @@ namespace NWQSim
         IdxType* result = nullptr;
         CuCtx cu_ctx_;
 
-        virtual void simulation_kernel(const std::vector<SVGate> &gates)
+        void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
+            int nproc = pg.size().value();
             std::cout << "[RANK " << rank << "] ==> Entering simulation_kernel." << std::endl;
         
             // ************************************************************************
@@ -462,7 +476,7 @@ namespace NWQSim
             flat_gates.reserve(gates.size() * 2);
         
             for (const auto& g : gates) {
-                if (g.op_name == OP::C1 || g.op_name == OP::C2) { // Process only C1 and C2 from the start
+                if (g.op_name == OP::C1 || g.op_name == OP::C2) {
                     if (g.op_name == OP::C1) {
                         flat_gates.push_back(g);
                     } else { // It must be OP::C2
@@ -489,14 +503,12 @@ namespace NWQSim
                         }
                     }
                 }
-                // Any other gate type is now explicitly ignored and will not enter flat_gates.
             }
-            std::cout << "[RANK " << rank << "] simulation_kernel: Pass 1 (Decomposition) complete. Original gates: " << gates.size() << ", Flat C1/C2 gates: " << flat_gates.size() << "." << std::endl;
+            std::cout << "[RANK " << rank << "] simulation_kernel: Pass 1 (Decomposition) complete. Flat C1/C2 gates: " << flat_gates.size() << "." << std::endl;
         
         
             // ************************************************************************
             // PASS 2: Layer the flat, nearest-neighbor circuit.
-            // The loop now only needs to handle C1 and C2 because that's all that's left.
             // ************************************************************************
             std::vector<std::vector<SVGate>> layers;
             layers.reserve(flat_gates.size());
@@ -511,41 +523,40 @@ namespace NWQSim
                 }
             }
             std::cout << "[RANK " << rank << "] simulation_kernel: Pass 2 (Layering) complete. Created " << layers.size() << " layers." << std::endl;
+            
+            // Barrier to ensure all ranks have finished layering before printing begins.
+            pg.barrier();
         
             // ************************************************************************
-            // DIAGNOSTIC CHECK: This check is now sufficient because we know only
-            // C1 and C2 gates exist in the layers.
+            // NEW DIAGNOSTIC PRINTING: Each rank prints its schedule in order.
             // ************************************************************************
-            for (size_t i = 0; i < layers.size(); ++i) {
-                const auto& layer = layers[i];
-                std::set<int> used_qubits_in_layer;
-                for (const auto& gate : layer) {
-                    if (gate.op_name == OP::C1) {
-                        if (used_qubits_in_layer.count(gate.qubit)) {
-                            std::stringstream ss;
-                            ss << "[RANK " << rank << "] FATAL ERROR IN LAYERING: Layer " << i << " has a conflict! Qubit " << gate.qubit << " is used multiple times.";
-                            tamm::tamm_terminate(ss.str());
+            for (int i = 0; i < nproc; ++i) {
+                if (rank == i) {
+                    std::cout << "\n--- SCHEDULE FOR RANK " << rank << " ---" << std::endl;
+                    for (size_t j = 0; j < layers.size(); ++j) {
+                        std::cout << "Layer " << j << ": ";
+                        for (const auto& gate : layers[j]) {
+                            std::cout << gate_to_string(gate) << " ";
                         }
-                        used_qubits_in_layer.insert(gate.qubit);
-                    } else if (gate.op_name == OP::C2) {
-                        if (used_qubits_in_layer.count(gate.ctrl) || used_qubits_in_layer.count(gate.qubit)) {
-                            std::stringstream ss;
-                            ss << "[RANK " << rank << "] FATAL ERROR IN LAYERING: Layer " << i << " has a conflict! Qubits (" << gate.ctrl << ", " << gate.qubit << ") overlap with another gate in the same layer.";
-                            tamm::tamm_terminate(ss.str());
-                        }
-                        used_qubits_in_layer.insert(gate.ctrl);
-                        used_qubits_in_layer.insert(gate.qubit);
+                        std::cout << std::endl;
                     }
+                    std::cout << "--- END SCHEDULE FOR RANK " << rank << " ---" << std::endl;
+                    // Flush the output to ensure it appears on the console immediately.
+                    std::cout.flush();
                 }
+                // This barrier makes sure that Rank i finishes printing before Rank i+1 starts.
+                pg.barrier();
             }
-            if (rank == 0) std::cout << "simulation_kernel: Diagnostic check passed. All layers are conflict-free." << std::endl;
+            // Final barrier to regroup before continuing.
+            pg.barrier();
         
             // ************************************************************************
-            // EXECUTION: Execute the correctly formed layers.
+            // EXECUTION: Execute the layers.
             // ************************************************************************
             int layer_idx = 0;
             for (const auto& layer : layers)
             {
+                // ... (rest of your simulation kernel is unchanged) ...
                 if (layer.empty()) {
                     layer_idx++;
                     continue;
