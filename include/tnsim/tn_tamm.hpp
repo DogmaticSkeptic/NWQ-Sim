@@ -1204,141 +1204,142 @@ namespace NWQSim
 //            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data: Exiting." << std::endl;
 //            return chi;
 //        }
-//        void right_canonicalize(std::vector<tamm::Tensor<Cplx>> &MPS)
-//        {
-//            // canonicalize MPS from right end toward left
-//            for (IdxType i = n_qubits - 1; i > 0; --i)
-//            {
-//                // extract dimensions and assemble Mmat for SVD
-//                IdxType Dl_old = bond_dims[i];
-//                IdxType Dr     = bond_dims[i + 1];
-//                IdxType d      = phys_dims[i];
-//                Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Mmat(Dl_old, d * Dr);
-//                {
-//                    auto &T = MPS[i];
-//                    for (const auto &blockid : T.loop_nest())
-//                    {
-//                        const size_t bs = T.block_size(blockid);
-//                        std::vector<Cplx> hostbuf(bs);
-//                        T.get(blockid, hostbuf);
-//                        auto dims = T.block_dims(blockid);
-//                        auto offs = T.block_offsets(blockid);
-//                        size_t idx = 0;
-//                        for (size_t ll = offs[0]; ll < offs[0] + dims[0]; ++ll)
-//                        {
-//                            for (size_t pp = offs[1]; pp < offs[1] + dims[1]; ++pp)
-//                            {
-//                                for (size_t rr = offs[2]; rr < offs[2] + dims[2]; ++rr, ++idx)
-//                                {
-//                                    Mmat(ll, pp * Dr + rr) = hostbuf[idx];
-//                                }
-//                            }
-//                        }
-//                    }
-//                }
-//        
-//                // perform SVD and truncate to bond dimension
-//                Eigen::BDCSVD<decltype(Mmat)> svd(Mmat, Eigen::ComputeThinU | Eigen::ComputeThinV);
-//                auto svals = svd.singularValues();
-//                IdxType chi = std::min<IdxType>(IdxType(svals.size()), max_bond_dim);
-//                auto Umat  = svd.matrixU().leftCols(chi);
-//                auto Vh    = svd.matrixV().leftCols(chi).adjoint();
-//                bond_dims[i] = chi;
-//                {
-//                    tamm::IndexSpace is_new{ tamm::range(chi) };
-//                    bond_tis[i] = tamm::TiledIndexSpace(is_new, block_size);
-//                }
-//        
-//                // build updated right tensor via Vh
-//                tamm::Tensor<Cplx> Tnew({ bond_tis[i], phys_tis[i], bond_tis[i + 1] });
-//                Tnew.set_dense();
-//                Tnew.allocate(&ec);
-//                {
-//                    auto &T = Tnew;
-//                    for (const auto &blockid : T.loop_nest())
-//                    {
-//                        const size_t bs = T.block_size(blockid);
-//                        std::vector<Cplx> hostbuf(bs);
-//                        auto dims = T.block_dims(blockid);
-//                        auto offs = T.block_offsets(blockid);
-//                        size_t idx = 0;
-//                        for (size_t ll = offs[0]; ll < offs[0] + dims[0]; ++ll)
-//                        {
-//                            for (size_t pp = offs[1]; pp < offs[1] + dims[1]; ++pp)
-//                            {
-//                                for (size_t rr = offs[2]; rr < offs[2] + dims[2]; ++rr, ++idx)
-//                                {
-//                                    hostbuf[idx] = Vh(ll, pp * Dr + rr);
-//                                }
-//                            }
-//                        }
-//                        T.put(blockid, hostbuf);
-//                    }
-//                }
-//        
-//                // update left neighbor via Umat * S
-//                IdxType Dl_prev = bond_dims[i - 1];
-//                IdxType d_prev  = phys_dims[i - 1];
-//                Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Mprev(Dl_prev * d_prev, Dl_old);
-//                {
-//                    auto &Told = MPS[i - 1];
-//                    for (const auto &blockid : Told.loop_nest())
-//                    {
-//                        const size_t bs = Told.block_size(blockid);
-//                        std::vector<Cplx> hostbuf(bs);
-//                        Told.get(blockid, hostbuf);
-//                        auto dims = Told.block_dims(blockid);
-//                        auto offs = Told.block_offsets(blockid);
-//                        size_t idx = 0;
-//                        for (size_t ll = offs[0]; ll < offs[0] + dims[0]; ++ll)
-//                        {
-//                            for (size_t pp = offs[1]; pp < offs[1] + dims[1]; ++pp)
-//                            {
-//                                for (size_t rr = offs[2]; rr < offs[2] + dims[2]; ++rr, ++idx)
-//                                {
-//                                    Mprev(ll * d_prev + pp, rr) = hostbuf[idx];
-//                                }
-//                            }
-//                        }
-//                    }
-//                }
-//                auto US     = Umat * svals.head(chi).asDiagonal();
-//                auto Mprev2 = Mprev * US;
-//        
-//                // build updated left tensor via Mprev2
-//                tamm::Tensor<Cplx> Tprev({ bond_tis[i - 1], phys_tis[i - 1], bond_tis[i] });
-//                Tprev.set_dense();
-//                Tprev.allocate(&ec);
-//                {
-//                    auto &T = Tprev;
-//                    for (const auto &blockid : T.loop_nest())
-//                    {
-//                        const size_t bs = T.block_size(blockid);
-//                        std::vector<Cplx> hostbuf(bs);
-//                        auto dims = T.block_dims(blockid);
-//                        auto offs = T.block_offsets(blockid);
-//                        size_t idx = 0;
-//                        for (size_t ll = offs[0]; ll < offs[0] + dims[0]; ++ll)
-//                        {
-//                            for (size_t pp = offs[1]; pp < offs[1] + dims[1]; ++pp)
-//                            {
-//                                for (size_t rr = offs[2]; rr < offs[2] + dims[2]; ++rr, ++idx)
-//                                {
-//                                    hostbuf[idx] = Mprev2(ll * d_prev + pp, rr);
-//                                }
-//                            }
-//                        }
-//                        T.put(blockid, hostbuf);
-//                    }
-//                }
-//        
-//                // replace tensors in MPS
-//                MPS[i].deallocate();
-//                MPS[i - 1].deallocate();
-//                MPS[i]     = std::move(Tnew);
-//                MPS[i - 1] = std::move(Tprev);
-//            }
-//        }
+//
+        void right_canonicalize(std::vector<tamm::Tensor<Cplx>> &MPS)
+        {
+            // canonicalize MPS from right end toward left
+            for (IdxType i = n_qubits - 1; i > 0; --i)
+            {
+                // extract dimensions and assemble Mmat for SVD
+                IdxType Dl_old = bond_dims[i];
+                IdxType Dr     = bond_dims[i + 1];
+                IdxType d      = phys_dims[i];
+                Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Mmat(Dl_old, d * Dr);
+                {
+                    auto &T = MPS[i];
+                    for (const auto &blockid : T.loop_nest())
+                    {
+                        const size_t bs = T.block_size(blockid);
+                        std::vector<Cplx> hostbuf(bs);
+                        T.get(blockid, hostbuf);
+                        auto dims = T.block_dims(blockid);
+                        auto offs = T.block_offsets(blockid);
+                        size_t idx = 0;
+                        for (size_t ll = offs[0]; ll < offs[0] + dims[0]; ++ll)
+                        {
+                            for (size_t pp = offs[1]; pp < offs[1] + dims[1]; ++pp)
+                            {
+                                for (size_t rr = offs[2]; rr < offs[2] + dims[2]; ++rr, ++idx)
+                                {
+                                    Mmat(ll, pp * Dr + rr) = hostbuf[idx];
+                                }
+                            }
+                        }
+                    }
+                }
+        
+                // perform SVD and truncate to bond dimension
+                Eigen::BDCSVD<decltype(Mmat)> svd(Mmat, Eigen::ComputeThinU | Eigen::ComputeThinV);
+                auto svals = svd.singularValues();
+                IdxType chi = std::min<IdxType>(IdxType(svals.size()), max_bond_dim);
+                auto Umat  = svd.matrixU().leftCols(chi);
+                auto Vh    = svd.matrixV().leftCols(chi).adjoint();
+                bond_dims[i] = chi;
+                {
+                    tamm::IndexSpace is_new{ tamm::range(chi) };
+                    bond_tis[i] = tamm::TiledIndexSpace(is_new, block_size);
+                }
+        
+                // build updated right tensor via Vh
+                tamm::Tensor<Cplx> Tnew({ bond_tis[i], phys_tis[i], bond_tis[i + 1] });
+                Tnew.set_dense();
+                Tnew.allocate(&ec);
+                {
+                    auto &T = Tnew;
+                    for (const auto &blockid : T.loop_nest())
+                    {
+                        const size_t bs = T.block_size(blockid);
+                        std::vector<Cplx> hostbuf(bs);
+                        auto dims = T.block_dims(blockid);
+                        auto offs = T.block_offsets(blockid);
+                        size_t idx = 0;
+                        for (size_t ll = offs[0]; ll < offs[0] + dims[0]; ++ll)
+                        {
+                            for (size_t pp = offs[1]; pp < offs[1] + dims[1]; ++pp)
+                            {
+                                for (size_t rr = offs[2]; rr < offs[2] + dims[2]; ++rr, ++idx)
+                                {
+                                    hostbuf[idx] = Vh(ll, pp * Dr + rr);
+                                }
+                            }
+                        }
+                        T.put(blockid, hostbuf);
+                    }
+                }
+        
+                // update left neighbor via Umat * S
+                IdxType Dl_prev = bond_dims[i - 1];
+                IdxType d_prev  = phys_dims[i - 1];
+                Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Mprev(Dl_prev * d_prev, Dl_old);
+                {
+                    auto &Told = MPS[i - 1];
+                    for (const auto &blockid : Told.loop_nest())
+                    {
+                        const size_t bs = Told.block_size(blockid);
+                        std::vector<Cplx> hostbuf(bs);
+                        Told.get(blockid, hostbuf);
+                        auto dims = Told.block_dims(blockid);
+                        auto offs = Told.block_offsets(blockid);
+                        size_t idx = 0;
+                        for (size_t ll = offs[0]; ll < offs[0] + dims[0]; ++ll)
+                        {
+                            for (size_t pp = offs[1]; pp < offs[1] + dims[1]; ++pp)
+                            {
+                                for (size_t rr = offs[2]; rr < offs[2] + dims[2]; ++rr, ++idx)
+                                {
+                                    Mprev(ll * d_prev + pp, rr) = hostbuf[idx];
+                                }
+                            }
+                        }
+                    }
+                }
+                auto US     = Umat * svals.head(chi).asDiagonal();
+                auto Mprev2 = Mprev * US;
+        
+                // build updated left tensor via Mprev2
+                tamm::Tensor<Cplx> Tprev({ bond_tis[i - 1], phys_tis[i - 1], bond_tis[i] });
+                Tprev.set_dense();
+                Tprev.allocate(&ec);
+                {
+                    auto &T = Tprev;
+                    for (const auto &blockid : T.loop_nest())
+                    {
+                        const size_t bs = T.block_size(blockid);
+                        std::vector<Cplx> hostbuf(bs);
+                        auto dims = T.block_dims(blockid);
+                        auto offs = T.block_offsets(blockid);
+                        size_t idx = 0;
+                        for (size_t ll = offs[0]; ll < offs[0] + dims[0]; ++ll)
+                        {
+                            for (size_t pp = offs[1]; pp < offs[1] + dims[1]; ++pp)
+                            {
+                                for (size_t rr = offs[2]; rr < offs[2] + dims[2]; ++rr, ++idx)
+                                {
+                                    hostbuf[idx] = Mprev2(ll * d_prev + pp, rr);
+                                }
+                            }
+                        }
+                        T.put(blockid, hostbuf);
+                    }
+                }
+        
+                // replace tensors in MPS
+                MPS[i].deallocate();
+                MPS[i - 1].deallocate();
+                MPS[i]     = std::move(Tnew);
+                MPS[i - 1] = std::move(Tprev);
+            }
+        }
 
         void left_canonicalize(std::vector<tamm::Tensor<Cplx>>& MPS)
         {
