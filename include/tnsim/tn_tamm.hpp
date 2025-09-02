@@ -117,24 +117,20 @@ namespace NWQSim
             max_bond_dim(max_bond_dim),
             sv_cutoff(sv_cutoff),
             pg(init_pg()),
-            ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga), // Global EC
-            sch_global(ec),
-            ec_local(tamm::ProcGroup::create_self(), tamm::DistributionKind::dense, tamm::MemoryManagerKind::local), // Local EC
-            sch_local(ec_local)
+            ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga), // Init Global EC
+            sch_global(ec),                                                     // Init Global Scheduler
+            ec_local(tamm::ProcGroup::create_self(), tamm::DistributionKind::dense, tamm::MemoryManagerKind::local), // Init Local EC
+            sch_local(ec_local)                                                 // Init Local Scheduler
         {
+            // ... (rest of the constructor code is correct) ...
             i_proc = pg.rank().value();
-            
             if (backend == "TN_TAMM_CPU") exec_hw = tamm::ExecutionHW::CPU;
             else if(backend == "TN_TAMM_GPU") exec_hw = tamm::ExecutionHW::GPU;
-    
-            // --- Qubit Partitioning ---
             int world_size = pg.size().value();
             IdxType qubits_per_rank = n_qubits / world_size;
             IdxType remainder = n_qubits % world_size;
             start_qubit = pg.rank().value() * qubits_per_rank + std::min((IdxType)pg.rank().value(), remainder);
             end_qubit = start_qubit + qubits_per_rank + (pg.rank().value() < remainder ? 1 : 0);
-            
-            // --- Index Space Initialization (Same as before) ---
             bond_tis.resize(n_qubits + 1);
             bond_dims.resize(n_qubits + 1);
             for (IdxType i = 0; i <= n_qubits; ++i) {
@@ -142,7 +138,6 @@ namespace NWQSim
                 tamm::IndexSpace is{ tamm::range(1) };
                 bond_tis[i] = tamm::TiledIndexSpace(is, block_size);
             }
-        
             phys_tis.resize(n_qubits);
             phys_dims.resize(n_qubits);
             for (IdxType i = 0; i < n_qubits; ++i) {
@@ -150,17 +145,13 @@ namespace NWQSim
                 tamm::IndexSpace is{ tamm::range(2) };
                 phys_tis[i] = tamm::TiledIndexSpace(is, 1);
             }
-        
-            // --- Allocate ONLY the local slice of MPS tensors ---
-            mps_tensors.resize(n_qubits); // Still size n_qubits for easy indexing
+            mps_tensors.resize(n_qubits);
             for (IdxType i = start_qubit; i < end_qubit; ++i) {
                 mps_tensors[i] = tamm::Tensor<Cplx>({ bond_tis[i], phys_tis[i], bond_tis[i + 1] });
                 mps_tensors[i].set_dense();
                 sch_local.allocate(mps_tensors[i]);
             }
             sch_local.execute(exec_hw);
-    
-            // Initialize to |0...0> state on the first rank
             if (start_qubit == 0) {
                 auto& T = mps_tensors[0];
                 T.loop_nest().iterate([&](auto const& idxs){
@@ -435,26 +426,34 @@ namespace NWQSim
 
 
 
-    protected:
-        IdxType n_qubits;
-        IdxType* results = NULL;
-        IdxType max_bond_dim;
-        int block_size;
-        double sv_cutoff;
-        tamm::ExecutionHW exec_hw;
-
-        IdxType start_qubit;
-        IdxType end_qubit;
-
-        tamm::ProcGroup pg;
-        tamm::ExecutionContext ec_local;
-        std::vector<IdxType> bond_dims;
-        std::vector<IdxType> phys_dims;
-        std::vector<tamm::TiledIndexSpace> bond_tis;
-        std::vector<tamm::TiledIndexSpace> phys_tis;
-        std::vector<tamm::Tensor<Cplx>> mps_tensors;
-        IdxType* result = nullptr;
-        CuCtx cu_ctx_;
+        protected:
+            IdxType n_qubits;
+            IdxType* results = NULL;
+            IdxType max_bond_dim;
+            int block_size;
+            double sv_cutoff;
+            tamm::ExecutionHW exec_hw;
+        
+            // --- ADD/MODIFY THESE MEMBERS ---
+            tamm::ProcGroup pg;             // Global process group
+            tamm::ExecutionContext ec;      // Global execution context
+            tamm::Scheduler sch_global;     // Scheduler for GLOBAL operations (communication)
+        
+            tamm::ExecutionContext ec_local;  // LOCAL execution context (per-rank)
+            tamm::Scheduler sch_local;      // Scheduler for LOCAL operations (computation)
+        
+            // Qubit partitioning info for this rank
+            IdxType start_qubit;
+            IdxType end_qubit;
+            // --- END OF ADDITIONS/MODIFICATIONS ---
+        
+            std::vector<IdxType> bond_dims;
+            std::vector<IdxType> phys_dims;
+            std::vector<tamm::TiledIndexSpace> bond_tis;
+            std::vector<tamm::TiledIndexSpace> phys_tis;
+            std::vector<tamm::Tensor<Cplx>> mps_tensors;
+            IdxType* result = nullptr;
+            CuCtx cu_ctx_;
 
         // In the TN_TAMM class
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
@@ -599,13 +598,12 @@ namespace NWQSim
         int get_owner_rank(IdxType qubit_idx) const {
             int world_size = pg.size().value();
             if (world_size == 1) return 0;
-
-            IdxType qubits_per_rank = n_ququbits / world_size;
-            IdxType remainder = n_qubits % world_size;
+        
+            IdxType qubits_per_rank = n_qubits / world_size; // CORRECTED
+            IdxType remainder = n_qubits % world_size;       // CORRECTED
             
-            // Qubits in the first 'remainder' ranks, which have an extra qubit
             IdxType boundary_qubit = remainder * (qubits_per_rank + 1);
-
+        
             if (qubit_idx < boundary_qubit) {
                 return qubit_idx / (qubits_per_rank + 1);
             } else {
