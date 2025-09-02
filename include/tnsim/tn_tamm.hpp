@@ -113,7 +113,6 @@ namespace NWQSim
                 std::string backend = "TN_TAMM_CPU")
         : QuantumState(SimType::TN),
             n_qubits(n_qubits),
-            block_size(2048),
             max_bond_dim(max_bond_dim),
             sv_cutoff(sv_cutoff),
             pg(init_pg()),
@@ -156,7 +155,7 @@ namespace NWQSim
             {
                 bond_dims[i] = 1;
                 tamm::IndexSpace is{ tamm::range(1) };
-                bond_tis[i] = tamm::TiledIndexSpace(is, block_size);
+                bond_tis[i] = tamm::TiledIndexSpace(is);
             }
         
             // initialize physical index spaces
@@ -493,7 +492,7 @@ namespace NWQSim
         IdxType n_qubits;
         IdxType* results = NULL;
         IdxType max_bond_dim;
-        int block_size;
+        int block_size = 2048;
         double sv_cutoff;
         tamm::ExecutionHW exec_hw;
 
@@ -782,15 +781,10 @@ namespace NWQSim
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
-            //std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
-        
             auto all_metadata = allgather_metadata(local_results);
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
-        
             tamm::Scheduler sch_global{ec};
             
             // --- PHASE 1: Deallocate old tensors and update bond dimension metadata ---
-            // A set to avoid duplicate deallocations if a qubit is touched multiple times (e.g., in a SWAP)
             std::set<IdxType> deallocated_sites; 
             for (const auto& meta : all_metadata)
             {
@@ -808,14 +802,13 @@ namespace NWQSim
                 // Update the bond dimension state for the next layer
                 bond_dims[meta.q0 + 1] = meta.new_bond_dim;
                 tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
-                bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+                
+                // CHANGED: Do not specify a tile size. The TiledIndexSpace will have a single tile
+                // spanning the entire new bond dimension.
+                bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond);
             }
         
             // --- PHASE 2: Allocate new tensors with the now-consistent dimensions ---
-            std::vector<tamm::Tensor<Cplx>> new_tensors;
-            new_tensors.reserve(deallocated_sites.size());
-        
-            // Use a map to create only one new tensor per site.
             std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
         
             for(const auto& site : deallocated_sites) {
@@ -828,18 +821,15 @@ namespace NWQSim
             }
         
             // Execute all deallocations and allocations collectively
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Executing deallocations and allocations..." << std::endl;
             sch_global.execute(exec_hw);
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
         
             // --- PHASE 3: Transfer data from compute ranks to new tensors ---
-            pg.barrier(); // Ensure allocations are visible everywhere before puts.
+            pg.barrier(); 
         
             int local_result_idx = 0;
             for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
                 
-                // The rank that computed the result now puts the data into the new global tensors
                 if (rank == meta.original_rank) {
                     auto& result_data = local_results[local_result_idx++];
                     assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
@@ -847,24 +837,20 @@ namespace NWQSim
                     auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
                     auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
         
-                    //std::cout << "[RANK " << rank << "] apply_collective_updates: Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
                     tamm::span<Cplx> t0_span{result_data.new_T0_data};
                     tamm::span<Cplx> t1_span{result_data.new_T1_data};
                     
-                    // Perform the put. This is a one-sided, blocking communication.
                     new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), t0_span);
                     new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), t1_span);
                 }
             }
             
-            pg.barrier(); // Ensure all puts are complete.
+            pg.barrier();
         
             // --- PHASE 4: Update the main MPS state with the new tensors ---
             for(auto const& [site, new_tensor] : site_to_new_tensor) {
                 mps_tensors[site] = new_tensor;
             }
-        
-            //std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
 
         // This function is now a "local kernel". It will be called via RPC
