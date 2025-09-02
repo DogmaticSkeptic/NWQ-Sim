@@ -765,15 +765,16 @@ namespace NWQSim
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
-            //std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
+            int world_size = pg.size().value();
         
+            // PHASE 1: Gather metadata about all updates across all ranks.
+            // This tells every rank what happened and what the new tensor structures will be.
             auto all_metadata = allgather_metadata(local_results);
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
         
             tamm::Scheduler sch_global{ec};
             
-            // --- PHASE 1: Deallocate old tensors and update bond dimension metadata ---
-            // A set to avoid duplicate deallocations if a qubit is touched multiple times (e.g., in a SWAP)
+            // PHASE 2: Deallocate old tensors and update bond dimension metadata.
+            // This is a collective preparation step.
             std::set<IdxType> deallocated_sites; 
             for (const auto& meta : all_metadata)
             {
@@ -788,19 +789,13 @@ namespace NWQSim
                     deallocated_sites.insert(meta.q1);
                 }
         
-                // Update the bond dimension state for the next layer
                 bond_dims[meta.q0 + 1] = meta.new_bond_dim;
                 tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
                 bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
             }
         
-            // --- PHASE 2: Allocate new tensors with the now-consistent dimensions ---
-            std::vector<tamm::Tensor<Cplx>> new_tensors;
-            new_tensors.reserve(deallocated_sites.size());
-        
-            // Use a map to create only one new tensor per site.
+            // PHASE 3: Allocate new tensors.
             std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
-        
             for(const auto& site : deallocated_sites) {
                 site_to_new_tensor.emplace(
                     site,
@@ -809,47 +804,91 @@ namespace NWQSim
                 site_to_new_tensor.at(site).set_dense();
                 sch_global.allocate(site_to_new_tensor.at(site));
             }
-        
-            // Execute all deallocations and allocations collectively
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Executing deallocations and allocations..." << std::endl;
+            
             sch_global.execute(exec_hw);
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
+            pg.barrier(); // Ensure allocations are visible everywhere.
         
-            // --- PHASE 3: Transfer data from compute ranks to new tensors ---
-            pg.barrier(); // Ensure allocations are visible everywhere before puts.
+            // PHASE 4: Efficient Data Redistribution with MPI
+            std::vector<MPI_Request> requests;
+            std::vector<std::vector<Cplx>> recv_buffers; // Buffers to hold incoming data
         
-            int local_result_idx = 0;
+            // Determine what this rank needs to receive and post Irecvs
             for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
+        
+                auto& new_T0 = site_to_new_tensor.at(meta.q0);
+                auto [owner_T0, offset_T0] = new_T0.distribution().locate(*(new_T0.loop_nest().begin()));
                 
-                // The rank that computed the result now puts the data into the new global tensors
-                if (rank == meta.original_rank) {
-                    auto& result_data = local_results[local_result_idx++];
-                    assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
+                auto& new_T1 = site_to_new_tensor.at(meta.q1);
+                auto [owner_T1, offset_T1] = new_T1.distribution().locate(*(new_T1.loop_nest().begin()));
+                
+                if (rank == owner_T0.value()) {
+                    recv_buffers.emplace_back(new_T0.size());
+                    MPI_Request req;
+                    MPI_Irecv(recv_buffers.back().data(), new_T0.size() * sizeof(Cplx), MPI_BYTE,
+                              meta.original_rank, meta.q0, pg.comm(), &req);
+                    requests.push_back(req);
+                }
         
-                    auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
-                    auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
-        
-                    //std::cout << "[RANK " << rank << "] apply_collective_updates: Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
-                    tamm::span<Cplx> t0_span{result_data.new_T0_data};
-                    tamm::span<Cplx> t1_span{result_data.new_T1_data};
-                    
-                    // Perform the put. This is a one-sided, blocking communication.
-                    new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), t0_span);
-                    new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), t1_span);
+                if (rank == owner_T1.value()) {
+                    recv_buffers.emplace_back(new_T1.size());
+                    MPI_Request req;
+                    MPI_Irecv(recv_buffers.back().data(), new_T1.size() * sizeof(Cplx), MPI_BYTE,
+                              meta.original_rank, meta.q1, pg.comm(), &req);
+                    requests.push_back(req);
                 }
             }
-            
-            pg.barrier(); // Ensure all puts are complete.
         
-            // --- PHASE 4: Update the main MPS state with the new tensors ---
+            // Each rank sends the results it computed
+            for (auto& result : local_results) {
+                if (!result.is_valid) continue;
+        
+                auto& new_T0_dest = site_to_new_tensor.at(result.q0);
+                auto [owner_T0, offset_T0] = new_T0_dest.distribution().locate(*(new_T0_dest.loop_nest().begin()));
+        
+                auto& new_T1_dest = site_to_new_tensor.at(result.q1);
+                auto [owner_T1, offset_T1] = new_T1_dest.distribution().locate(*(new_T1_dest.loop_nest().begin()));
+        
+                MPI_Request req;
+                MPI_Isend(result.new_T0_data.data(), result.new_T0_data.size() * sizeof(Cplx), MPI_BYTE,
+                          owner_T0.value(), result.q0, pg.comm(), &req);
+                requests.push_back(req);
+        
+                MPI_Isend(result.new_T1_data.data(), result.new_T1_data.size() * sizeof(Cplx), MPI_BYTE,
+                          owner_T1.value(), result.q1, pg.comm(), &req);
+                requests.push_back(req);
+            }
+            
+            // Wait for all non-blocking communications to complete
+            MPI_Waitall(requests.size(), requests.data(), MPI_STATUSES_IGNORE);
+        
+            // PHASE 5: Local data placement.
+            // Each rank now has the data it needs in its recv_buffers. This is just a fast memory copy.
+            int recv_buf_idx = 0;
+            for (const auto& meta : all_metadata) {
+                if (!meta.is_valid) continue;
+        
+                auto& new_T0 = site_to_new_tensor.at(meta.q0);
+                auto [owner_T0, offset_T0] = new_T0.distribution().locate(*(new_T0.loop_nest().begin()));
+        
+                auto& new_T1 = site_to_new_tensor.at(meta.q1);
+                auto [owner_T1, offset_T1] = new_T1.distribution().locate(*(new_T1.loop_nest().begin()));
+        
+                if (rank == owner_T0.value()) {
+                    new_T0.put(*(new_T0.loop_nest().begin()), recv_buffers[recv_buf_idx++]);
+                }
+                if (rank == owner_T1.value()) {
+                    new_T1.put(*(new_T1.loop_nest().begin()), recv_buffers[recv_buf_idx++]);
+                }
+            }
+        
+            pg.barrier(); // Final sync before updating the main state vector.
+        
+            // PHASE 6: Update the main MPS state with the new tensors.
             for(auto const& [site, new_tensor] : site_to_new_tensor) {
                 mps_tensors[site] = new_tensor;
             }
-        
-            //std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
-
         // This function is now a "local kernel". It will be called via RPC
         // on the rank that owns the target tensor block.
         void C1_GATE_local_kernel(tamm::Tensor<Cplx>& target_tensor, const std::array<Cplx, 4>& U)
