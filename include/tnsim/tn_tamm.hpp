@@ -59,6 +59,15 @@ namespace NWQSim
 
     class TN_TAMM;
 
+    // Add this inside the TN_TAMM class, near the other struct definitions
+    struct BoundaryGateResult {
+        bool is_valid = false;
+        IdxType q0, q1;
+        IdxType new_bond_dim;
+        std::vector<Cplx> new_T0_data;
+        std::vector<Cplx> new_T1_data;
+    };
+
     struct LocalGateResult {
         bool is_valid = false;
         IdxType q0, q1;
@@ -530,6 +539,8 @@ namespace NWQSim
             
             pg.barrier();
 
+            pg.barrier();
+
             for (int layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
                 const auto& layer = layers[layer_idx];
                 if (layer.empty()) continue;
@@ -538,10 +549,12 @@ namespace NWQSim
                 pg.barrier();
                 auto start_layer = std::chrono::high_resolution_clock::now();
 
+                std::vector<BoundaryGateResult> boundary_results;
+
                 for (const auto& g : layer) {
                     if (g.op_name == OP::C1) {
                         if (g.qubit >= start_qubit && g.qubit < end_qubit) {
-                            std::cout << "[RANK " << i_proc << "] Applying C1 gate on local qubit " << g.qubit << std::endl;
+                            // std::cout << "[RANK " << i_proc << "] Applying C1 gate on local qubit " << g.qubit << std::endl;
                             std::array<Cplx, 4> U;
                             for (int i = 0; i < 4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
                             C1_GATE_local_kernel(mps_tensors[g.qubit], U);
@@ -554,19 +567,26 @@ namespace NWQSim
                         bool q1_is_local = (q1 >= start_qubit && q1 < end_qubit);
 
                         if (q0_is_local && q1_is_local) {
-                            std::cout << "[RANK " << i_proc << "] Applying C2 gate on local qubits (" << q0 << ", " << q1 << ")" << std::endl;
+                            // std::cout << "[RANK " << i_proc << "] Applying C2 gate on local qubits (" << q0 << ", " << q1 << ")" << std::endl;
                             std::array<Cplx, 16> U4;
                             for (int i = 0; i < 16; ++i) U4[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
                             C2_GATE_local_op(U4, q0, q1);
                         } else if (q0_is_local || q1_is_local) {
-                            std::cout << "[RANK " << i_proc << "] Applying C2 gate on boundary qubits (" << q0 << ", " << q1 << ")" << std::endl;
+                            // std::cout << "[RANK " << i_proc << "] Applying C2 gate on boundary qubits (" << q0 << ", " << q1 << ")" << std::endl;
                             std::array<Cplx, 16> U4;
                             for (int i = 0; i < 16; ++i) U4[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
-                            C2_GATE_boundary_op(U4, q0, q1);
+                            BoundaryGateResult res = C2_GATE_boundary_op(U4, q0, q1);
+                            if (res.is_valid) {
+                                boundary_results.push_back(std::move(res));
+                            }
                         }
                     }
                 }
-                pg.barrier(); 
+                
+                // --- Collective update phase for the entire layer ---
+                apply_boundary_updates(boundary_results);
+                
+                pg.barrier(); // Barrier after each layer to ensure global consistency
                 
                 auto end_layer = std::chrono::high_resolution_clock::now();
                 double layer_time = std::chrono::duration<double>(end_layer - start_layer).count();
@@ -576,6 +596,115 @@ namespace NWQSim
             }
             
             pg.barrier();
+        }
+
+
+        // Add this new function to the TN_TAMM class
+        void apply_boundary_updates(const std::vector<BoundaryGateResult>& local_results)
+        {
+            int rank = pg.rank().value();
+            int world_size = pg.size().value();
+        
+            // Step 1: Gather metadata (bond_index, new_dim, original_rank)
+            struct BoundaryMeta { IdxType bond_idx; IdxType new_dim; int comp_rank; };
+            std::vector<BoundaryMeta> local_meta;
+            for (const auto& res : local_results) {
+                local_meta.push_back({res.q0 + 1, res.new_bond_dim, rank});
+            }
+        
+            int local_count = local_meta.size();
+            std::vector<int> all_counts(world_size);
+            MPI_Allgather(&local_count, 1, MPI_INT, all_counts.data(), 1, MPI_INT, pg.comm());
+        
+            int total_updates = 0;
+            std::vector<int> displacements(world_size);
+            for(int i=0; i<world_size; ++i) {
+                displacements[i] = (i > 0) ? displacements[i-1] + all_counts[i-1] : 0;
+                total_updates += all_counts[i];
+            }
+            
+            std::vector<BoundaryMeta> all_meta(total_updates);
+            MPI_Allgatherv(local_meta.data(), local_count, MPI_UNSIGNED_LONG_LONG, 
+                           all_meta.data(), all_counts.data(), displacements.data(),
+                           MPI_UNSIGNED_LONG_LONG, pg.comm());
+        
+            // Step 2: Deallocate and reallocate all affected tensors on all ranks
+            std::set<IdxType> sites_to_realloc;
+            for(const auto& meta : all_meta) {
+                bond_dims[meta.bond_idx] = meta.new_dim;
+                sites_to_realloc.insert(meta.bond_idx - 1);
+                sites_to_realloc.insert(meta.bond_idx);
+            }
+        
+            for(auto site : sites_to_realloc) {
+                if(site >= start_qubit && site < end_qubit) {
+                    sch_local.deallocate(mps_tensors[site]);
+                    tamm::IndexSpace is_new_bond{tamm::range(bond_dims[site+1])};
+                    bond_tis[site+1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+                    
+                    mps_tensors[site] = tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]};
+                    mps_tensors[site].set_dense();
+                    sch_local.allocate(mps_tensors[site]);
+                }
+            }
+            sch_local.execute(exec_hw);
+            
+            // Step 3: Redistribute data with non-blocking communication
+            std::vector<MPI_Request> requests;
+            std::vector<std::vector<Cplx>> recv_buffers;
+        
+            int res_idx = 0;
+            for (const auto& meta : all_meta) {
+                int comp_rank = meta.comp_rank;
+                IdxType q0 = meta.bond_idx - 1;
+                IdxType q1 = meta.bond_idx;
+                int owner_q0 = get_owner_rank(q0);
+                int owner_q1 = get_owner_rank(q1);
+                
+                if (rank == owner_q0) {
+                    recv_buffers.emplace_back(mps_tensors[q0].size());
+                    MPI_Request req;
+                    MPI_Irecv(recv_buffers.back().data(), recv_buffers.back().size() * sizeof(Cplx), MPI_BYTE,
+                              comp_rank, q0, pg.comm(), &req);
+                    requests.push_back(req);
+                }
+                if (rank == owner_q1) {
+                    recv_buffers.emplace_back(mps_tensors[q1].size());
+                    MPI_Request req;
+                    MPI_Irecv(recv_buffers.back().data(), recv_buffers.back().size() * sizeof(Cplx), MPI_BYTE,
+                              comp_rank, q1, pg.comm(), &req);
+                    requests.push_back(req);
+                }
+                
+                if (rank == comp_rank) {
+                    MPI_Request req;
+                    MPI_Isend(local_results[res_idx].new_T0_data.data(), local_results[res_idx].new_T0_data.size() * sizeof(Cplx), MPI_BYTE,
+                              owner_q0, q0, pg.comm(), &req);
+                    requests.push_back(req);
+                    MPI_Isend(local_results[res_idx].new_T1_data.data(), local_results[res_idx].new_T1_data.size() * sizeof(Cplx), MPI_BYTE,
+                              owner_q1, q1, pg.comm(), &req);
+                    requests.push_back(req);
+                    res_idx++;
+                }
+            }
+        
+            MPI_Waitall(requests.size(), requests.data(), MPI_STATUSES_IGNORE);
+            
+            // Step 4: Local data placement
+            int recv_buf_idx = 0;
+            for (const auto& meta : all_meta) {
+                IdxType q0 = meta.bond_idx - 1;
+                IdxType q1 = meta.bond_idx;
+                int owner_q0 = get_owner_rank(q0);
+                int owner_q1 = get_owner_rank(q1);
+        
+                if (rank == owner_q0) {
+                    mps_tensors[q0].put(*(mps_tensors[q0].loop_nest().begin()), recv_buffers[recv_buf_idx++]);
+                }
+                if (rank == owner_q1) {
+                    mps_tensors[q1].put(*(mps_tensors[q1].loop_nest().begin()), recv_buffers[recv_buf_idx++]);
+                }
+            }
         }
 
         // Add this function inside the TN_TAMM class
@@ -638,106 +767,99 @@ namespace NWQSim
             }
         }
 
-        void C2_GATE_boundary_op(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
+        BoundaryGateResult C2_GATE_boundary_op(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
-            
             int left_rank = get_owner_rank(q0);
             int right_rank = get_owner_rank(q1);
         
+            // Ranks not involved in this specific gate do nothing and return immediately.
             if (rank != left_rank && rank != right_rank) {
-                return;
+                return {false}; // Return an invalid result.
             }
             
             std::cout << "[RANK " << rank << "] Participating in boundary op for (" << q0 << ", " << q1 
                       << "). Left rank: " << left_rank << ", Right rank: " << right_rank << std::endl;
         
-            tamm::Tensor<Cplx> T1_local; 
-            
-            if (rank == left_rank) {
-                T1_local = tamm::Tensor<Cplx>({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
-                T1_local.set_dense();
-                sch_local.allocate(T1_local).execute(exec_hw);
+            BoundaryGateResult result;
+            tamm::Tensor<Cplx> T1_remote; 
         
-                std::vector<Cplx> t1_buf(T1_local.size());
+            // Step 1: Exchange Tensors between the two participating ranks.
+            if (rank == left_rank) {
+                // I am the LEFT rank. I will receive the tensor from my right neighbor.
+                T1_remote = tamm::Tensor<Cplx>({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
+                T1_remote.set_dense();
+                sch_local.allocate(T1_remote).execute(exec_hw);
+        
+                std::vector<Cplx> t1_buf(T1_remote.size());
                 std::cout << "[RANK " << rank << "] Posting Recv for T[" << q1 << "] from rank " << right_rank 
                           << ". Buffer size: " << t1_buf.size() << std::endl;
+                          
                 MPI_Recv(t1_buf.data(), t1_buf.size() * sizeof(Cplx), MPI_BYTE,
                          right_rank, q1, pg.comm(), MPI_STATUS_IGNORE);
+                         
                 std::cout << "[RANK " << rank << "] Received T[" << q1 << "]." << std::endl;
-                T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
+                T1_remote.put(*(T1_remote.loop_nest().begin()), t1_buf);
             }
             else { // rank == right_rank
+                // I am the RIGHT rank. I will send my local tensor to my left neighbor.
                 auto& T1_to_send = mps_tensors[q1];
                 std::vector<Cplx> t1_buf(T1_to_send.size());
                 T1_to_send.get(*(T1_to_send.loop_nest().begin()), t1_buf);
+                
                 std::cout << "[RANK " << rank << "] Sending T[" << q1 << "] to rank " << left_rank 
                           << ". Buffer size: " << t1_buf.size() << std::endl;
+                          
                 MPI_Send(t1_buf.data(), t1_buf.size() * sizeof(Cplx), MPI_BYTE,
                          left_rank, q1, pg.comm());
+                         
                 std::cout << "[RANK " << rank << "] Sent T[" << q1 << "]." << std::endl;
             }
         
-            std::vector<Cplx> new_T0_data;
-            std::vector<Cplx> new_T1_data;
-            IdxType new_bond_dim = 0;
-        
+            // Step 2: Perform the computation ONLY on the left_rank.
             if (rank == left_rank) {
                 std::cout << "[RANK " << rank << "] Starting local computation for boundary gate (" << q0 << ", " << q1 << ")." << std::endl;
+                
+                // This is the tensor I already own locally.
                 tamm::Tensor<Cplx>& T0_local = mps_tensors[q0];
-        
-                // ... (rest of local computation: M_local, G4_local, M2_local, SVD) ...
-                // This part is likely correct, so we'll keep it concise for now.
-                tamm::Tensor<Cplx> M2_local; // Assume this is computed correctly
-                // ...
                 
-                new_bond_dim = local_svd_and_reconstruct_data(M2_local, new_T0_data, new_T1_data, q0, q1);
-                std::cout << "[RANK " << rank << "] SVD complete. New bond dim for bond " << q0+1 << " is " << new_bond_dim << std::endl;
+                // Create local intermediates for the contraction.
+                tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+                tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
+                tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+                M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
+                sch_local.allocate(M_local, G4_local, M2_local).execute(exec_hw);
+        
+                // Contract the two tensors.
+                sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_remote("b","p1","r")).execute(exec_hw);
+                
+                // Fill the gate tensor.
+                auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
+                    auto offsets = G4_local.block_offsets(bid);
+                    int p0p = offsets[0], p1p = offsets[1], p0 = offsets[2], p1 = offsets[3];
+                    buf[0] = U4[(p0p * 2 + p1p) * 4 + (p0 * 2 + p1)];
+                };
+                tamm::update_tensor(G4_local, fill_g4);
+                
+                // Apply the gate.
+                sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
+        
+                // Perform SVD and reconstruct the new tensor data.
+                result.is_valid = true;
+                result.q0 = q0;
+                result.q1 = q1;
+                result.new_bond_dim = local_svd_and_reconstruct_data(M2_local, result.new_T0_data, result.new_T1_data, q0, q1);
+                
+                std::cout << "[RANK " << rank << "] SVD complete. New bond dim for bond " << q0+1 << " is " << result.new_bond_dim << std::endl;
+        
+                // Clean up all local temporary tensors.
+                sch_local.deallocate(T1_remote, M_local, G4_local, M2_local).execute(exec_hw);
             }
             
-            std::cout << "[RANK " << rank << "] Entering Bcast for new_bond_dim." << std::endl;
-            MPI_Bcast(&new_bond_dim, 1, MPI_UNSIGNED_LONG_LONG, left_rank, pg.comm());
-            std::cout << "[RANK " << rank << "] Bcast complete. New bond dim for bond " << q0+1 << " is " << new_bond_dim << std::endl;
-        
-            bond_dims[q0 + 1] = new_bond_dim;
-            tamm::IndexSpace is_new_bond{tamm::range(new_bond_dim)};
-            bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
-        
-            if (rank == left_rank) {
-                std::cout << "[RANK " << rank << "] Reallocating local tensor T[" << q0 << "]." << std::endl;
-                sch_local.deallocate(mps_tensors[q0]).execute(exec_hw);
-                mps_tensors[q0] = tamm::Tensor<Cplx>{bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]};
-                mps_tensors[q0].set_dense();
-                sch_local.allocate(mps_tensors[q0]).execute(exec_hw);
-            }
-            if (rank == right_rank) {
-                std::cout << "[RANK " << rank << "] Reallocating local tensor T[" << q1 << "]." << std::endl;
-                sch_local.deallocate(mps_tensors[q1]).execute(exec_hw);
-                mps_tensors[q1] = tamm::Tensor<Cplx>{bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]};
-                mps_tensors[q1].set_dense();
-                sch_local.allocate(mps_tensors[q1]).execute(exec_hw);
-            }
-            
-            if (rank == left_rank) {
-                std::cout << "[RANK " << rank << "] Putting new data into local T[" << q0 << "]." << std::endl;
-                mps_tensors[q0].put(*(mps_tensors[q0].loop_nest().begin()), new_T0_data);
-                
-                std::cout << "[RANK " << rank << "] Sending new T[" << q1 << "] data to rank " << right_rank << ". Size: " << new_T1_data.size() << std::endl;
-                MPI_Send(new_T1_data.data(), new_T1_data.size() * sizeof(Cplx), MPI_BYTE,
-                         right_rank, 1, pg.comm());
-                std::cout << "[RANK " << rank << "] Sent new T[" << q1 << "]." << std::endl;
-            }
-            else { // rank == right_rank
-                std::vector<Cplx> new_T1_buf(mps_tensors[q1].size());
-                std::cout << "[RANK " << rank << "] Posting Recv for new T[" << q1 << "] data from rank " << left_rank 
-                          << ". Buffer size: " << new_T1_buf.size() << std::endl;
-                MPI_Recv(new_T1_buf.data(), new_T1_buf.size() * sizeof(Cplx), MPI_BYTE,
-                         left_rank, 1, pg.comm(), MPI_STATUS_IGNORE);
-                std::cout << "[RANK " << rank << "] Received new T[" << q1 << "]. Putting into local tensor." << std::endl;
-                mps_tensors[q1].put(*(mps_tensors[q1].loop_nest().begin()), new_T1_buf);
-            }
+            // The left_rank returns the computed result.
+            // The right_rank returns an invalid result struct, as it did no computation.
+            return result; 
         }
-
         // In the TN_TAMM class
         std::vector<LocalGateResult> run_gates_parallel(const std::vector<SVGate>& batch)
         {
