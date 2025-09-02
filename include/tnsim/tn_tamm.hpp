@@ -185,10 +185,15 @@ namespace NWQSim
         }
 
         void reset_state() override {
-            //printf("Inside reset gate\n");
-            for(IdxType i = 0; i < n_qubits; ++i)
+            // In the new model, each rank is only responsible for resetting
+            // the tensors it owns. The loop must iterate over the local slice.
+            for (IdxType i = start_qubit; i < end_qubit; ++i)
             {
                 auto& T = mps_tensors[i];
+        
+                // This lambda correctly sets the tensor to represent the |0> state
+                // within the MPS formalism when the bond dimension is 1.
+                // It sets T[0,0,0] = 1.0 and all other elements to 0.0.
                 T.loop_nest().iterate([&](auto const& idxs)
                 {
                     Cplx v = (idxs[0] == 0 && idxs[1] == 0 && idxs[2] == 0)
@@ -197,6 +202,10 @@ namespace NWQSim
                     T.put(idxs, gsl::span<Cplx>(&v,1));
                 });
             }
+        
+            // It's good practice to ensure all ranks have finished resetting
+            // before any other operation proceeds.
+            pg.barrier();
         }
 
         void set_seed(IdxType seed) override
