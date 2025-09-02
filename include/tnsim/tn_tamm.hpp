@@ -594,16 +594,10 @@ namespace NWQSim
                     auto end_sync = std::chrono::high_resolution_clock::now();
                     double sync_time = std::chrono::duration<double>(end_sync - start_sync).count();
         
-                    // Take maximum time across all ranks for consistent reporting
-                    double max_exec_time = 0.0;
-                    double max_sync_time = 0.0;
-                    pg.all_reduce(&exec_time, &max_exec_time, 1, ReduceOp::MAX);
-                    pg.all_reduce(&sync_time, &max_sync_time, 1, ReduceOp::MAX);
-        
                     if (rank == 0) {
                         std::cout << "Layer " << layer_idx
-                                  << " | exec_time = " << max_exec_time << " s"
-                                  << " | sync_time = " << max_sync_time << " s" << std::endl;
+                                  << " | exec_time = " << exec_time << " s"
+                                  << " | sync_time = " << sync_time << " s" << std::endl;
                     }
                     // ==================================================================
                 }
