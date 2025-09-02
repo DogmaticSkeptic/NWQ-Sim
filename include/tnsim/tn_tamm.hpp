@@ -511,16 +511,11 @@ namespace NWQSim
                 } else if (g.op_name == OP::M || g.op_name == OP::MA || g.op_name == OP::RESET) {
                     sequential_gates.push_back(g);
                 //} else {
-                   // if (rank == 0) {
+                    // if (rank == 0) {
                         //std::cout << "Warning: Unrecognized gate type encountered and ignored." << std::endl;
-                   // }
+                    //}
                 }
             }
-        
-//            if (rank == 0) {
-                //std::cout << "Circuit separated into " << parallel_gates.size() << " parallelizable gates and "
-  //                        << sequential_gates.size() << " sequential gates." << std::endl;
- //           }
         
             // ************************************************************************
             // STAGE 2: Parallel Execution of Unitary Gates
@@ -573,8 +568,8 @@ namespace NWQSim
                         place_c2(g, g.ctrl, g.qubit, layers, last_layer_map);
                     }
                 }
-                
-                pg.barrier(); 
+        
+                pg.barrier();
         
                 // EXECUTION of layers
                 for (int layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
@@ -582,14 +577,35 @@ namespace NWQSim
                     if (layer.empty()) {
                         continue;
                     }
-                    //if (rank == 0) //std::cout << "Starting parallel layer " << layer_idx << std::endl;
-                    
+        
+                    // ========================= NEW TIMING CODE =========================
+                    pg.barrier();
+                    auto start_exec = std::chrono::high_resolution_clock::now();
                     auto local_update_results = run_gates_parallel(layer);
                     pg.barrier();
+                    auto end_exec = std::chrono::high_resolution_clock::now();
+                    double exec_time = std::chrono::duration<double>(end_exec - start_exec).count();
+        
+                    // First barrier before applying updates
+                    pg.barrier();
+                    auto start_sync = std::chrono::high_resolution_clock::now();
                     apply_collective_updates(local_update_results);
                     pg.barrier();
-                    
-                    //if (rank == 0) //std::cout << "Finished parallel layer " << layer_idx << std::endl;
+                    auto end_sync = std::chrono::high_resolution_clock::now();
+                    double sync_time = std::chrono::duration<double>(end_sync - start_sync).count();
+        
+                    // Take maximum time across all ranks for consistent reporting
+                    double max_exec_time = 0.0;
+                    double max_sync_time = 0.0;
+                    pg.all_reduce(&exec_time, &max_exec_time, 1, ReduceOp::MAX);
+                    pg.all_reduce(&sync_time, &max_sync_time, 1, ReduceOp::MAX);
+        
+                    if (rank == 0) {
+                        std::cout << "Layer " << layer_idx
+                                  << " | exec_time = " << max_exec_time << " s"
+                                  << " | sync_time = " << max_sync_time << " s" << std::endl;
+                    }
+                    // ==================================================================
                 }
             }
         
@@ -597,7 +613,7 @@ namespace NWQSim
             // STAGE 3: Sequential Execution of Non-Unitary Gates
             // ************************************************************************
             pg.barrier(); // Ensure all parallel work is finished.
-            
+        
             //if (rank == 0 && !sequential_gates.empty()) {
                 //std::cout << "---------- STARTING SEQUENTIAL GATES ----------" << std::endl;
             //}
