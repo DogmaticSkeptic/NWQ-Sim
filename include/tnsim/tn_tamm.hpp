@@ -117,96 +117,56 @@ namespace NWQSim
             max_bond_dim(max_bond_dim),
             sv_cutoff(sv_cutoff),
             pg(init_pg()),
-            ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga)
+            ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga), // Global EC
+            sch_global(ec),
+            ec_local(tamm::ProcGroup::create_self(), tamm::DistributionKind::dense, tamm::MemoryManagerKind::local), // Local EC
+            sch_local(ec_local)
         {
-            // set the i_proc to prevent repeat prints
             i_proc = pg.rank().value();
             
-            // print the tamm execution context, this can be commented out if desired
-            if(ec.print()) {
-                auto current_time   = std::chrono::system_clock::now();
-                auto current_time_t = std::chrono::system_clock::to_time_t(current_time);
-                auto cur_local_time = localtime(&current_time_t);
-                std::cout << std::endl << "date: " << std::put_time(cur_local_time, "%c") << std::endl;
-                std::cout << "nnodes: " << ec.nnodes() << ", ";
-                std::cout << "nproc_per_node: " << ec.ppn() << ", ";
-                std::cout << "nproc_total: " << ec.nnodes() * ec.ppn() << ", ";
-                if(ec.has_gpu()) {
-                  std::cout << "ngpus_per_node: " << ec.gpn() << ", ";
-                  std::cout << "ngpus_total: " << ec.nnodes() * ec.gpn() << std::endl;
-                }
-                std::cout << std::endl;
-                ec.print_mem_info();
-                std::cout << std::endl;
-            }
-            // change between cpu or gpu tensor contraction
-            if (backend == "TN_TAMM_CPU")
-            {
-                exec_hw = tamm::ExecutionHW::CPU;
-            }
-            else if(backend == "TN_TAMM_GPU")
-            {
-                exec_hw = tamm::ExecutionHW::GPU;
-            }
-
-            // initialize bond index spaces
+            if (backend == "TN_TAMM_CPU") exec_hw = tamm::ExecutionHW::CPU;
+            else if(backend == "TN_TAMM_GPU") exec_hw = tamm::ExecutionHW::GPU;
+    
+            // --- Qubit Partitioning ---
+            int world_size = pg.size().value();
+            IdxType qubits_per_rank = n_qubits / world_size;
+            IdxType remainder = n_qubits % world_size;
+            start_qubit = pg.rank().value() * qubits_per_rank + std::min((IdxType)pg.rank().value(), remainder);
+            end_qubit = start_qubit + qubits_per_rank + (pg.rank().value() < remainder ? 1 : 0);
+            
+            // --- Index Space Initialization (Same as before) ---
             bond_tis.resize(n_qubits + 1);
             bond_dims.resize(n_qubits + 1);
-            for (IdxType i = 0; i <= n_qubits; ++i)
-            {
+            for (IdxType i = 0; i <= n_qubits; ++i) {
                 bond_dims[i] = 1;
                 tamm::IndexSpace is{ tamm::range(1) };
                 bond_tis[i] = tamm::TiledIndexSpace(is, block_size);
             }
         
-            // initialize physical index spaces
             phys_tis.resize(n_qubits);
             phys_dims.resize(n_qubits);
-            for (IdxType i = 0; i < n_qubits; ++i)
-            {
+            for (IdxType i = 0; i < n_qubits; ++i) {
                 phys_dims[i] = 2;
                 tamm::IndexSpace is{ tamm::range(2) };
                 phys_tis[i] = tamm::TiledIndexSpace(is, 1);
             }
         
-            // allocate and initialize MPS tensors
-            mps_tensors.reserve(n_qubits);
-            for (IdxType i = 0; i < n_qubits; ++i)
-            {
-                tamm::Tensor<Cplx> T({ bond_tis[i], phys_tis[i], bond_tis[i + 1] });
-                T.set_dense();
-                T.allocate(&ec);
-        
-                for (const auto & blockid : T.loop_nest())
-                {
-                    const size_t block_size = T.block_size(blockid);
-                    std::vector<Cplx> hostbuf(block_size);
-        
-                    auto dims = T.block_dims(blockid);
-                    auto offsets = T.block_offsets(blockid);
-        
-                    for (size_t idx = 0; idx < block_size; ++idx)
-                    {
-                        size_t rem = idx;
-                        size_t l_loc = rem % dims[0];
-                        rem /= dims[0];
-                        size_t p_loc = rem % dims[1];
-                        rem /= dims[1];
-                        size_t r_loc = rem % dims[2];
-        
-                        IdxType l = offsets[0] + l_loc;
-                        IdxType p = offsets[1] + p_loc;
-                        IdxType r = offsets[2] + r_loc;
-        
-                        hostbuf[idx] = (l == 0 && p == 0 && r == 0)
-                                       ? Cplx{1.0, 0.0}
-                                       : Cplx{0.0, 0.0};
-                    }
-        
-                    T.put(blockid, hostbuf);
-                }
-        
-                mps_tensors.push_back(std::move(T));
+            // --- Allocate ONLY the local slice of MPS tensors ---
+            mps_tensors.resize(n_qubits); // Still size n_qubits for easy indexing
+            for (IdxType i = start_qubit; i < end_qubit; ++i) {
+                mps_tensors[i] = tamm::Tensor<Cplx>({ bond_tis[i], phys_tis[i], bond_tis[i + 1] });
+                mps_tensors[i].set_dense();
+                sch_local.allocate(mps_tensors[i]);
+            }
+            sch_local.execute(exec_hw);
+    
+            // Initialize to |0...0> state on the first rank
+            if (start_qubit == 0) {
+                auto& T = mps_tensors[0];
+                T.loop_nest().iterate([&](auto const& idxs){
+                    Cplx v = (idxs[0] == 0 && idxs[1] == 0 && idxs[2] == 0) ? Cplx(1.0,0.0) : Cplx(0.0,0.0);
+                    T.put(idxs, gsl::span<Cplx>(&v,1));
+                });
             }
         }
 
@@ -483,8 +443,11 @@ namespace NWQSim
         double sv_cutoff;
         tamm::ExecutionHW exec_hw;
 
+        IdxType start_qubit;
+        IdxType end_qubit;
+
         tamm::ProcGroup pg;
-        tamm::ExecutionContext ec;
+        tamm::ExecutionContext ec_local;
         std::vector<IdxType> bond_dims;
         std::vector<IdxType> phys_dims;
         std::vector<tamm::TiledIndexSpace> bond_tis;
@@ -494,15 +457,11 @@ namespace NWQSim
         CuCtx cu_ctx_;
 
         // In the TN_TAMM class
-        
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
-            //if (rank == 0) //std::cout << "==> Entering simulation_kernel." << std::endl;
-        
-            // ************************************************************************
-            // STAGE 1: Gate Sorting
-            // ************************************************************************
+            
+            // The gate sorting and flattening logic remains the same.
             std::vector<SVGate> parallel_gates;
             std::vector<SVGate> sequential_gates;
             for (const auto& g : gates) {
@@ -510,125 +469,261 @@ namespace NWQSim
                     parallel_gates.push_back(g);
                 } else if (g.op_name == OP::M || g.op_name == OP::MA || g.op_name == OP::RESET) {
                     sequential_gates.push_back(g);
-                //} else {
-                    // if (rank == 0) {
-                        //std::cout << "Warning: Unrecognized gate type encountered and ignored." << std::endl;
-                    //}
                 }
             }
-        
-            // ************************************************************************
-            // STAGE 2: Parallel Execution of Unitary Gates
-            // ************************************************************************
+            
+            std::vector<std::vector<SVGate>> layers;
             if (!parallel_gates.empty()) {
-                // PASS 1: Decompose non-local gates into sequences of local SWAPs.
                 std::vector<SVGate> flat_gates;
-                flat_gates.reserve(parallel_gates.size() * 2); // Pre-allocate memory
+                flat_gates.reserve(parallel_gates.size() * 2); 
         
                 for (const auto& g : parallel_gates) {
                     if (g.op_name == OP::C1) {
                         flat_gates.push_back(g);
-                    } else { // It must be OP::C2
+                    } else { 
                         int a = g.ctrl;
                         int b = g.qubit;
-        
-                        // Based on the new rule, we assume a < b is always true.
-                        // The gate is non-local if the qubits are not adjacent.
                         if (b - a > 1) {
-                            // Decompose C2(a, b) into SWAPs and a local C2 gate.
-                            // 1. Move qubit 'a' forward until it is adjacent to 'b'.
-                            for (int k = a; k < b - 1; ++k) {
-                                flat_gates.push_back(make_swap_sv(k, k + 1));
-                            }
-        
-                            // 2. Apply the C2 gate on the now-adjacent pair (b-1, b).
-                            //    The logical qubit 'a' is now at physical site 'b-1'.
+                            for (int k = a; k < b - 1; ++k) flat_gates.push_back(make_swap_sv(k, k + 1));
                             flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
-        
-                            // 3. Undo the SWAPs in reverse order to restore the original qubit layout.
-                            for (int k = b - 2; k >= a; --k) {
-                                flat_gates.push_back(make_swap_sv(k, k + 1));
-                            }
+                            for (int k = b - 2; k >= a; --k) flat_gates.push_back(make_swap_sv(k, k + 1));
                         } else {
-                            // The gate is already local (b - a == 1).
                             flat_gates.push_back(g);
                         }
                     }
                 }
-        
-                // PASS 2: Layer the flattened circuit for parallel execution.
-                std::vector<std::vector<SVGate>> layers;
+                
                 layers.reserve(flat_gates.size());
                 std::map<int, int> last_layer_map;
         
                 for (const auto& g : flat_gates) {
-                    if (g.op_name == OP::C1) {
-                        place_c1(g, layers, last_layer_map);
-                    } else {
-                        place_c2(g, g.ctrl, g.qubit, layers, last_layer_map);
-                    }
-                }
-        
-                pg.barrier();
-        
-                // EXECUTION of layers
-                for (int layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
-                    const auto& layer = layers[layer_idx];
-                    if (layer.empty()) {
-                        continue;
-                    }
-        
-                    // ========================= NEW TIMING CODE =========================
-                    pg.barrier();
-                    auto start_exec = std::chrono::high_resolution_clock::now();
-                    auto local_update_results = run_gates_parallel(layer);
-                    pg.barrier();
-                    auto end_exec = std::chrono::high_resolution_clock::now();
-                    double exec_time = std::chrono::duration<double>(end_exec - start_exec).count();
-        
-                    // First barrier before applying updates
-                    pg.barrier();
-                    auto start_sync = std::chrono::high_resolution_clock::now();
-                    apply_collective_updates(local_update_results);
-                    pg.barrier();
-                    auto end_sync = std::chrono::high_resolution_clock::now();
-                    double sync_time = std::chrono::duration<double>(end_sync - start_sync).count();
-        
-                    if (rank == 0) {
-                        std::cout << "Layer " << layer_idx
-                                  << " | exec_time = " << exec_time << " s"
-                                  << " | sync_time = " << sync_time << " s" << std::endl;
-                    }
-                    // ==================================================================
+                    if (g.op_name == OP::C1) place_c1(g, layers, last_layer_map);
+                    else place_c2(g, g.ctrl, g.qubit, layers, last_layer_map);
                 }
             }
+            
+            pg.barrier();
         
-            // ************************************************************************
-            // STAGE 3: Sequential Execution of Non-Unitary Gates
-            // ************************************************************************
-            pg.barrier(); // Ensure all parallel work is finished.
+            // EXECUTION of layers
+            for (int layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+                const auto& layer = layers[layer_idx];
+                if (layer.empty()) continue;
+                
+                auto start_layer = std::chrono::high_resolution_clock::now();
         
-            //if (rank == 0 && !sequential_gates.empty()) {
-                //std::cout << "---------- STARTING SEQUENTIAL GATES ----------" << std::endl;
-            //}
+                for (const auto& g : layer) {
+                    if (g.op_name == OP::C1) {
+                        // 1-qubit gates are always local to the owning rank
+                        if (g.qubit >= start_qubit && g.qubit < end_qubit) {
+                            std::array<Cplx, 4> U;
+                            for (int i = 0; i < 4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
+                            C1_GATE_local_kernel(mps_tensors[g.qubit], U);
+                        }
+                    } else if (g.op_name == OP::C2) {
+                        IdxType q0 = g.ctrl;
+                        IdxType q1 = g.qubit;
         
-            //for (const auto &g : sequential_gates) {
-            //    if (g.op_name == OP::RESET) {
-            //        RESET_GATE(g.qubit);
-            //    } else if (g.op_name == OP::M) {
-            //        M_GATE(g.qubit);
-            //    } else if (g.op_name == OP::MA) {
-            //        MA_GATE(g.qubit); 
-            //    }
-            //}
+                        bool q0_is_local = (q0 >= start_qubit && q0 < end_qubit);
+                        bool q1_is_local = (q1 >= start_qubit && q1 < end_qubit);
         
-            //if (rank == 0 && !sequential_gates.empty()) {
-                //std::cout << "---------- FINISHED SEQUENTIAL GATES ----------" << std::endl;
-            //}
-        
-            pg.barrier(); // Final sync after all operations.
-            //if (rank == 0) //std::cout << "<== Exiting simulation_kernel." << std::endl;
+                        if (q0_is_local && q1_is_local) {
+                            // --- INTERNAL GATE: Purely local computation ---
+                            std::array<Cplx, 16> U4;
+                            for (int i = 0; i < 16; ++i) U4[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
+                            C2_GATE_local_op(U4, q0, q1);
+                        } else if (q0_is_local || q1_is_local) {
+                            // --- BOUNDARY GATE: Requires communication ---
+                            std::array<Cplx, 16> U4;
+                            for (int i = 0; i < 16; ++i) U4[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
+                            C2_GATE_boundary_op(U4, q0, q1);
+                        }
+                    }
+                }
+                pg.barrier(); // Barrier after each layer to ensure global consistency
+                
+                auto end_layer = std::chrono::high_resolution_clock::now();
+                double layer_time = std::chrono::duration<double>(end_layer - start_layer).count();
+                if (i_proc == 0) {
+                    std::cout << "Layer " << layer_idx << " | total_time = " << layer_time << " s" << std::endl;
+                }
+            }
+            
+            // Sequential gates (if any) would go here...
+            pg.barrier();
         }
+
+        // Add this function inside the TN_TAMM class
+        void C2_GATE_local_op(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
+        {
+            // This entire operation uses the LOCAL scheduler and is network-free.
+            
+            // Perform contraction and SVD on local tensors
+            tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+            tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
+            tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+            M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
+            sch_local.allocate(M_local, G4_local, M2_local).execute(exec_hw);
+        
+            sch_local(M_local("l","p0","p1","r") = mps_tensors[q0]("l","p0","b") * mps_tensors[q1]("b","p1","r")).execute(exec_hw);
+            
+            auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
+                auto offsets = G4_local.block_offsets(bid);
+                int p0p = offsets[0], p1p = offsets[1], p0 = offsets[2], p1 = offsets[3];
+                buf[0] = U4[(p0p * 2 + p1p) * 4 + (p0 * 2 + p1)];
+            };
+            tamm::update_tensor(G4_local, fill_g4);
+            
+            sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
+        
+            std::vector<Cplx> Ti_new_data, Tj_new_data;
+            IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
+            
+            sch_local.deallocate(mps_tensors[q0], mps_tensors[q1]).execute(exec_hw);
+        
+            bond_dims[q0 + 1] = new_bond_dim;
+            tamm::IndexSpace is_new_bond{tamm::range(new_bond_dim)};
+            bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+            
+            mps_tensors[q0] = tamm::Tensor<Cplx>{bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]};
+            mps_tensors[q1] = tamm::Tensor<Cplx>{bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]};
+            mps_tensors[q0].set_dense();
+            mps_tensors[q1].set_dense();
+            sch_local.allocate(mps_tensors[q0], mps_tensors[q1]).execute(exec_hw);
+        
+            mps_tensors[q0].put(*(mps_tensors[q0].loop_nest().begin()), Ti_new_data);
+            mps_tensors[q1].put(*(mps_tensors[q1].loop_nest().begin()), Tj_new_data);
+        
+            sch_local.deallocate(M_local, G4_local, M2_local).execute(exec_hw);
+        }
+
+        int get_owner_rank(IdxType qubit_idx) const {
+            int world_size = pg.size().value();
+            if (world_size == 1) return 0;
+
+            IdxType qubits_per_rank = n_ququbits / world_size;
+            IdxType remainder = n_qubits % world_size;
+            
+            // Qubits in the first 'remainder' ranks, which have an extra qubit
+            IdxType boundary_qubit = remainder * (qubits_per_rank + 1);
+
+            if (qubit_idx < boundary_qubit) {
+                return qubit_idx / (qubits_per_rank + 1);
+            } else {
+                return remainder + (qubit_idx - boundary_qubit) / qubits_per_rank;
+            }
+        }
+
+        void C2_GATE_boundary_op(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
+        {
+            int rank = pg.rank().value();
+            
+            // Step 1: Identify the two ranks involved.
+            // By convention from the circuit flattener, q0 is always the left qubit.
+            int left_rank = get_owner_rank(q0);
+            int right_rank = get_owner_rank(q1);
+        
+            // Only the two ranks involved in the boundary gate participate.
+            if (rank != left_rank && rank != right_rank) {
+                return;
+            }
+        
+            // Step 2 & 3: Exchange Tensors.
+            // The right rank sends its tensor (T[q1]) to the left rank.
+            // The left rank will perform the computation.
+            tamm::Tensor<Cplx> T1_local; // Will hold the received tensor on left_rank
+            
+            if (rank == left_rank) {
+                // Prepare to receive T[q1] from the right rank.
+                T1_local = tamm::Tensor<Cplx>({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
+                T1_local.set_dense();
+                sch_local.allocate(T1_local).execute(exec_hw);
+        
+                std::vector<Cplx> t1_buf(T1_local.size());
+                MPI_Recv(t1_buf.data(), t1_buf.size() * sizeof(Cplx), MPI_BYTE,
+                         right_rank, 0, pg.comm(), MPI_STATUS_IGNORE);
+                T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
+            }
+            else { // rank == right_rank
+                // Send T[q1] to the left rank.
+                auto& T1_to_send = mps_tensors[q1];
+                std::vector<Cplx> t1_buf(T1_to_send.size());
+                T1_to_send.get(*(T1_to_send.loop_nest().begin()), t1_buf);
+                MPI_Send(t1_buf.data(), t1_buf.size() * sizeof(Cplx), MPI_BYTE,
+                         left_rank, 0, pg.comm());
+            }
+        
+            // Step 4: Local Computation on the left_rank
+            std::vector<Cplx> new_T0_data;
+            std::vector<Cplx> new_T1_data;
+            IdxType new_bond_dim = 0;
+        
+            if (rank == left_rank) {
+                // Now left_rank has its own mps_tensors[q0] and the received T1_local.
+                // The logic here is identical to the C2_GATE_local_op.
+                tamm::Tensor<Cplx>& T0_local = mps_tensors[q0];
+        
+                tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+                tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
+                tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+                M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
+                sch_local.allocate(M_local, G4_local, M2_local).execute(exec_hw);
+        
+                sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
+                
+                auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
+                    auto offsets = G4_local.block_offsets(bid);
+                    int p0p = offsets[0], p1p = offsets[1], p0 = offsets[2], p1 = offsets[3];
+                    buf[0] = U4[(p0p * 2 + p1p) * 4 + (p0 * 2 + p1)];
+                };
+                tamm::update_tensor(G4_local, fill_g4);
+                
+                sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
+        
+                new_bond_dim = local_svd_and_reconstruct_data(M2_local, new_T0_data, new_T1_data, q0, q1);
+        
+                sch_local.deallocate(M_local, G4_local, M2_local, T1_local).execute(exec_hw);
+            }
+            
+            // Step 5: Broadcast new bond dimension from left_rank to all ranks.
+            // All ranks must participate in this collective.
+            MPI_Bcast(&new_bond_dim, 1, MPI_UNSIGNED_LONG_LONG, left_rank, pg.comm());
+        
+            // Step 6: All ranks update metadata and deallocate/reallocate tensors.
+            bond_dims[q0 + 1] = new_bond_dim;
+            tamm::IndexSpace is_new_bond{tamm::range(new_bond_dim)};
+            bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+        
+            if (rank == left_rank) {
+                sch_local.deallocate(mps_tensors[q0]).execute(exec_hw);
+                mps_tensors[q0] = tamm::Tensor<Cplx>{bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]};
+                mps_tensors[q0].set_dense();
+                sch_local.allocate(mps_tensors[q0]).execute(exec_hw);
+            }
+            if (rank == right_rank) {
+                sch_local.deallocate(mps_tensors[q1]).execute(exec_hw);
+                mps_tensors[q1] = tamm::Tensor<Cplx>{bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]};
+                mps_tensors[q1].set_dense();
+                sch_local.allocate(mps_tensors[q1]).execute(exec_hw);
+            }
+            
+            // Step 7: Distribute results back.
+            // left_rank sends the new T[q1] data to right_rank.
+            if (rank == left_rank) {
+                // Put its own new data
+                mps_tensors[q0].put(*(mps_tensors[q0].loop_nest().begin()), new_T0_data);
+                // Send the other tensor's data
+                MPI_Send(new_T1_data.data(), new_T1_data.size() * sizeof(Cplx), MPI_BYTE,
+                         right_rank, 1, pg.comm());
+            }
+            else { // rank == right_rank
+                // Receive the new data
+                std::vector<Cplx> new_T1_buf(mps_tensors[q1].size());
+                MPI_Recv(new_T1_buf.data(), new_T1_buf.size() * sizeof(Cplx), MPI_BYTE,
+                         left_rank, 1, pg.comm(), MPI_STATUS_IGNORE);
+                mps_tensors[q1].put(*(mps_tensors[q1].loop_nest().begin()), new_T1_buf);
+            }
+        }
+
 
         // In the TN_TAMM class
         std::vector<LocalGateResult> run_gates_parallel(const std::vector<SVGate>& batch)
