@@ -247,6 +247,11 @@ namespace NWQSim
 
         void sim(std::shared_ptr<NWQSim::Circuit> circuit) override
         {
+            // Initialize timing accumulators at the start of the simulation
+            total_synchronization_time = std::chrono::duration<double>(0.0);
+            total_contraction_time = std::chrono::duration<double>(0.0);
+            total_svd_time = std::chrono::duration<double>(0.0);
+        
             IdxType original_gate_count = circuit->num_gates();
             std::vector<SVGate> gates = fuse_circuit_sv(circuit);
             IdxType fused_gate_count = gates.size();
@@ -258,23 +263,32 @@ namespace NWQSim
             auto end_time = std::chrono::high_resolution_clock::now();
             pg.barrier();
         
-            std::chrono::duration<double> elapsed_seconds = end_time - start_time;
+            std::chrono::duration<double> total_simulation_time = end_time - start_time;
         
             if (pg.rank().value() == 0) {
-                std::cout << "simulation_kernel execution time: "
-                          << elapsed_seconds.count() << " seconds." << std::endl;
+                std::cout << "-----------------------------------------------------" << std::endl;
+                std::cout << "Simulation Timing Results:" << std::endl;
+                std::cout << "-----------------------------------------------------" << std::endl;
+                std::cout << std::fixed << std::setprecision(6);
+                std::cout << "Total simulation time          : " << total_simulation_time.count() << " seconds." << std::endl;
+                std::cout << "Total synchronization time     : " << total_synchronization_time.count() << " seconds." << std::endl;
+                std::cout << "Total tensor contraction time  : " << total_contraction_time.count() << " seconds." << std::endl;
+                std::cout << "Total SVD execution time       : " << total_svd_time.count() << " seconds." << std::endl;
+                std::cout << "-----------------------------------------------------" << std::endl;
         
+                // Optional: You can still write the total time to a CSV if you wish
                 std::ofstream csv_file("timings.csv", std::ios::app);
                 if (csv_file.is_open()) {
-                    csv_file << std::fixed << std::setprecision(6)
-                             << elapsed_seconds.count() << "\n";
+                    csv_file << total_simulation_time.count() << ","
+                             << total_synchronization_time.count() << ","
+                             << total_contraction_time.count() << ","
+                             << total_svd_time.count() << "\n";
                     csv_file.close();
                 } else {
                     std::cerr << "Error: Unable to open timings.csv for writing." << std::endl;
                 }
             }
         }
-
 
         IdxType* get_results() override
         {
@@ -493,6 +507,10 @@ namespace NWQSim
         IdxType* result = nullptr;
         CuCtx cu_ctx_;
 
+        std::chrono::duration<double> total_synchronization_time{0.0};
+        std::chrono::duration<double> total_contraction_time{0.0};
+        std::chrono::duration<double> total_svd_time{0.0};
+
         // In the TN_TAMM class
         
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
@@ -578,33 +596,32 @@ namespace NWQSim
                         continue;
                     }
         
-                    // ========================= NEW TIMING CODE =========================
+                    // Run gates in parallel (this includes C1 and C2 computations)
                     pg.barrier();
-                    auto start_exec = std::chrono::high_resolution_clock::now();
+                    // auto start_exec = std::chrono::high_resolution_clock::now(); // Moved timing specific to contraction/SVD inside functions
                     auto local_update_results = run_gates_parallel(layer);
-                    pg.barrier();
-                    auto end_exec = std::chrono::high_resolution_clock::now();
-                    double exec_time = std::chrono::duration<double>(end_exec - start_exec).count();
+                    // auto end_exec = std::chrono::high_resolution_clock::now();
+                    // double exec_time = std::chrono::duration<double>(end_exec - start_exec).count();
         
-                    // First barrier before applying updates
-                    pg.barrier();
+                    // Apply collective updates (includes synchronization)
+                    pg.barrier(); // First barrier before applying updates
                     auto start_sync = std::chrono::high_resolution_clock::now();
                     apply_collective_updates(local_update_results);
-                    pg.barrier();
+                    pg.barrier(); // Barrier after collective updates
                     auto end_sync = std::chrono::high_resolution_clock::now();
-                    double sync_time = std::chrono::duration<double>(end_sync - start_sync).count();
+                    
+                    // Accumulate synchronization time
+                    total_synchronization_time += (end_sync - start_sync);
         
-                    if (rank == 0) {
-                        std::cout << "Layer " << layer_idx
-                                  << " | exec_time = " << exec_time << " s"
-                                  << " | sync_time = " << sync_time << " s" << std::endl;
-                    }
-                    // ==================================================================
+                    // if (rank == 0) { // Removed per-layer print to avoid clutter, total will be printed at end
+                        //std::cout << "Layer " << layer_idx
+                                  //<< " | sync_time = " << std::chrono::duration<double>(end_sync - start_sync).count() << " s" << std::endl;
+                    //}
                 }
             }
         
             // ************************************************************************
-            // STAGE 3: Sequential Execution of Non-Unitary Gates
+            // STAGE 3: Sequential Execution of Non-Unitary Gates (NOT TIMED HERE as per request)
             // ************************************************************************
             pg.barrier(); // Ensure all parallel work is finished.
         
@@ -852,6 +869,8 @@ namespace NWQSim
 
         // This function is now a "local kernel". It will be called via RPC
         // on the rank that owns the target tensor block.
+        // This function is now a "local kernel". It will be called via RPC
+        // on the rank that owns the target tensor block.
         void C1_GATE_local_kernel(tamm::Tensor<Cplx>& target_tensor, const std::array<Cplx, 4>& U)
         {
             // 1. Create a local execution context for this operation.
@@ -891,8 +910,13 @@ namespace NWQSim
             T_in.put(*(T_in.loop_nest().begin()), t_in_buf);
         
             // 7. Perform the contraction locally.
+            auto start_contraction = std::chrono::high_resolution_clock::now();
             sch_local(T_new("l","p'","r") = G("p'","p") * T_in("l","p","r")).execute(exec_hw);
-        
+            auto end_contraction = std::chrono::high_resolution_clock::now();
+            
+            // Accumulate the time for this contraction
+            total_contraction_time += (end_contraction - start_contraction);
+
             // 8. Get the result back into a host buffer.
             std::vector<Cplx> t_out_buf(T_new.size());
             T_new.get(*(T_new.loop_nest().begin()), t_out_buf);
@@ -905,6 +929,7 @@ namespace NWQSim
             self_pg.destroy_coll();
         }
 
+        // This function now returns a struct containing the new data and metadata
         // This function now returns a struct containing the new data and metadata
         LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
@@ -935,6 +960,9 @@ namespace NWQSim
             M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
             sch_local.allocate(M_local, G4_local, M2_local).execute(exec_hw);
         
+            // --- Start Timing Contractions ---
+            auto start_contraction = std::chrono::high_resolution_clock::now();
+
             sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
             
             auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
@@ -945,7 +973,13 @@ namespace NWQSim
             tamm::update_tensor(G4_local, fill_g4);
             
             sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
-        
+
+            auto end_contraction = std::chrono::high_resolution_clock::now();
+            // --- End Timing Contractions ---
+            
+            // Accumulate the time for these contractions
+            total_contraction_time += (end_contraction - start_contraction);
+
             // 5. Perform SVD on the local M2_local tensor.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
@@ -1188,11 +1222,20 @@ namespace NWQSim
             }
             //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Reshape complete." << std::endl;
         
+            // --- Start Timing SVD ---
+            auto start_svd = std::chrono::high_resolution_clock::now();
+
             // Perform the SVD on the GPU.
             std::vector<double> S;
             std::vector<Cplx> U_row, VT_row;
             gpu_svd_jacobi(M2_col_major.data(), m, n, S, U_row, VT_row);
-        
+
+            auto end_svd = std::chrono::high_resolution_clock::now();
+            // --- End Timing SVD ---
+            
+            // Accumulate the time for this SVD operation
+            total_svd_time += (end_svd - start_svd);
+
             // Truncate based on singular value cutoff and max bond dimension.
             std::vector<IdxType> keep;
             keep.reserve(S.size());
