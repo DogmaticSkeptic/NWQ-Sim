@@ -539,9 +539,10 @@ namespace NWQSim
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
+            //if (rank == 0) //std::cout << "==> Entering simulation_kernel." << std::endl;
         
             // ************************************************************************
-            // STAGE 1: Gate Sorting (Identical to before)
+            // STAGE 1: Gate Sorting
             // ************************************************************************
             std::vector<SVGate> parallel_gates;
             std::vector<SVGate> sequential_gates;
@@ -550,6 +551,10 @@ namespace NWQSim
                     parallel_gates.push_back(g);
                 } else if (g.op_name == OP::M || g.op_name == OP::MA || g.op_name == OP::RESET) {
                     sequential_gates.push_back(g);
+                //} else {
+                    // if (rank == 0) {
+                        //std::cout << "Warning: Unrecognized gate type encountered and ignored." << std::endl;
+                    //}
                 }
             }
         
@@ -568,15 +573,26 @@ namespace NWQSim
                     } else { // It must be OP::C2
                         int a = g.ctrl;
                         int b = g.qubit;
+        
+                        // Based on the new rule, we assume a < b is always true.
+                        // The gate is non-local if the qubits are not adjacent.
                         if (b - a > 1) {
+                            // Decompose C2(a, b) into SWAPs and a local C2 gate.
+                            // 1. Move qubit 'a' forward until it is adjacent to 'b'.
                             for (int k = a; k < b - 1; ++k) {
                                 flat_gates.push_back(make_swap_sv(k, k + 1));
                             }
+        
+                            // 2. Apply the C2 gate on the now-adjacent pair (b-1, b).
+                            //    The logical qubit 'a' is now at physical site 'b-1'.
                             flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
+        
+                            // 3. Undo the SWAPs in reverse order to restore the original qubit layout.
                             for (int k = b - 2; k >= a; --k) {
                                 flat_gates.push_back(make_swap_sv(k, k + 1));
                             }
                         } else {
+                            // The gate is already local (b - a == 1).
                             flat_gates.push_back(g);
                         }
                     }
@@ -597,6 +613,8 @@ namespace NWQSim
                 auto end_scheduling = std::chrono::high_resolution_clock::now();
                 total_scheduling_time += (end_scheduling - start_scheduling);
         
+                pg.barrier();
+        
                 // EXECUTION of layers
                 for (int layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
                     const auto& layer = layers[layer_idx];
@@ -604,35 +622,55 @@ namespace NWQSim
                         continue;
                     }
         
-                    // --- Barrier 1: Sync before starting the layer ---
-                    auto start_barrier1 = std::chrono::high_resolution_clock::now();
+                    // Run gates in parallel (this includes C1 and C2 computations)
                     pg.barrier();
-                    auto end_barrier1 = std::chrono::high_resolution_clock::now();
-                    total_synchronization_time += (end_barrier1 - start_barrier1);
-        
-                    // --- Run local computations ---
+                    // auto start_exec = std::chrono::high_resolution_clock::now(); // Moved timing specific to contraction/SVD inside functions
                     auto local_update_results = run_gates_parallel(layer);
+                    // auto end_exec = std::chrono::high_resolution_clock::now();
+                    // double exec_time = std::chrono::duration<double>(end_exec - start_exec).count();
         
-                    // --- Apply collective updates (now correctly timed inside the function) ---
+                    // Apply collective updates (includes synchronization)
+                    pg.barrier(); // First barrier before applying updates
+                    auto start_sync = std::chrono::high_resolution_clock::now();
                     apply_collective_updates(local_update_results);
+                    pg.barrier(); // Barrier after collective updates
+                    auto end_sync = std::chrono::high_resolution_clock::now();
                     
-                    // --- Barrier 2: Sync after all updates are complete ---
-                    auto start_barrier2 = std::chrono::high_resolution_clock::now();
-                    pg.barrier();
-                    auto end_barrier2 = std::chrono::high_resolution_clock::now();
-                    total_synchronization_time += (end_barrier2 - start_barrier2);
+                    // Accumulate synchronization time
+                    total_synchronization_time += (end_sync - start_sync);
+        
+                    // if (rank == 0) { // Removed per-layer print to avoid clutter, total will be printed at end
+                        //std::cout << "Layer " << layer_idx
+                                  //<< " | sync_time = " << std::chrono::duration<double>(end_sync - start_sync).count() << " s" << std::endl;
+                    //}
                 }
             }
         
             // ************************************************************************
-            // STAGE 3: Sequential Execution (No change here)
+            // STAGE 3: Sequential Execution of Non-Unitary Gates (NOT TIMED HERE as per request)
             // ************************************************************************
-            auto start_final_barrier = std::chrono::high_resolution_clock::now();
             pg.barrier(); // Ensure all parallel work is finished.
-            auto end_final_barrier = std::chrono::high_resolution_clock::now();
-            total_synchronization_time += (end_final_barrier - start_final_barrier);
         
-            // Sequential gates can be run here if needed, but are not timed as per original logic
+            //if (rank == 0 && !sequential_gates.empty()) {
+                //std::cout << "---------- STARTING SEQUENTIAL GATES ----------" << std::endl;
+            //}
+        
+            //for (const auto &g : sequential_gates) {
+            //    if (g.op_name == OP::RESET) {
+            //        RESET_GATE(g.qubit);
+            //    } else if (g.op_name == OP::M) {
+            //        M_GATE(g.qubit);
+            //    } else if (g.op_name == OP::MA) {
+            //        MA_GATE(g.qubit); 
+            //    }
+            //}
+        
+            //if (rank == 0 && !sequential_gates.empty()) {
+                //std::cout << "---------- FINISHED SEQUENTIAL GATES ----------" << std::endl;
+            //}
+        
+            pg.barrier(); // Final sync after all operations.
+            //if (rank == 0) //std::cout << "<== Exiting simulation_kernel." << std::endl;
         }
 
         // In the TN_TAMM class
