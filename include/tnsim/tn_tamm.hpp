@@ -917,7 +917,7 @@ namespace NWQSim
             auto start_data_transfer = std::chrono::high_resolution_clock::now();
         
             // Each rank that computed a result now directly puts its data into the new global tensor.
-            for (const auto& result_data : local_results) {
+            for (auto& result_data : local_results) {
                 if(result_data.is_valid) {
                     auto& new_T0_ref = new_tensors.at(result_data.q0);
                     auto& new_T1_ref = new_tensors.at(result_data.q1);
