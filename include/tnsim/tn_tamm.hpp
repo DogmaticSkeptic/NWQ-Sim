@@ -808,99 +808,162 @@ namespace NWQSim
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
-            //std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
-        
+            int world_size = pg.size().value();
+            
             auto start_gather = std::chrono::high_resolution_clock::now();
-            auto all_metadata = allgather_metadata(local_results);
+        
+            // ---------------------------------------------------------------------------------
+            // PHASE 1: Gather metadata to the root process (rank 0) instead of Allgather.
+            // ---------------------------------------------------------------------------------
+            
+            // Create a compact metadata structure for communication.
+            std::vector<GateUpdateMetadata> local_metadata;
+            local_metadata.reserve(local_results.size());
+            for(const auto& res : local_results) {
+                if (res.is_valid) {
+                    local_metadata.push_back({
+                        true, res.q0, res.q1, res.new_bond_dim, res.original_rank
+                    });
+                }
+            }
+        
+            int local_metadata_count = local_metadata.size();
+            std::vector<int> all_metadata_counts(world_size);
+        
+            // Use MPI_Gather to get the number of updates from each rank.
+            MPI_Gather(&local_metadata_count, 1, MPI_INT, 
+                       all_metadata_counts.data(), 1, MPI_INT, 0, pg.comm());
+        
+            std::vector<GateUpdateMetadata> all_metadata;
+            std::vector<int> displacements;
+            if (rank == 0) {
+                displacements.resize(world_size);
+                int total_updates = 0;
+                for (int i = 0; i < world_size; ++i) {
+                    displacements[i] = (i == 0) ? 0 : displacements[i-1] + all_metadata_counts[i-1];
+                    total_updates += all_metadata_counts[i];
+                }
+                all_metadata.resize(total_updates);
+            }
+            
+            // Use MPI_Gatherv to collect all metadata on rank 0.
+            MPI_Gatherv(local_metadata.data(), local_metadata_count * sizeof(GateUpdateMetadata), MPI_BYTE,
+                        all_metadata.data(), (int*)all_metadata_counts.data(), (int*)displacements.data(), 
+                        MPI_BYTE, 0, pg.comm());
+            
+            // ---------------------------------------------------------------------------------
+            // PHASE 2: Rank 0 processes metadata and broadcasts the update plan.
+            // ---------------------------------------------------------------------------------
+            
+            if (rank == 0) {
+                for (const auto& meta : all_metadata) {
+                    if (meta.is_valid) {
+                        // The new bond dimension is determined by the update.
+                        bond_dims[meta.q0 + 1] = meta.new_bond_dim;
+                    }
+                }
+            }
+        
+            // Broadcast the updated bond_dims array to all processes.
+            MPI_Bcast(bond_dims.data(), bond_dims.size(), MPI_UNSIGNED_LONG_LONG, 0, pg.comm());
             auto end_gather = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_gather - start_gather);
-            
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
         
+            // ---------------------------------------------------------------------------------
+            // PHASE 3: Collective deallocation and allocation based on the broadcasted plan.
+            // ---------------------------------------------------------------------------------
+            
+            auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             tamm::Scheduler sch_global{ec};
             
-            // --- PHASE 1: Deallocate old tensors and update bond dimension metadata ---
-            // A set to avoid duplicate deallocations if a qubit is touched multiple times (e.g., in a SWAP)
-            std::set<IdxType> deallocated_sites; 
-            for (const auto& meta : all_metadata)
-            {
-                if (!meta.is_valid) continue;
-                
-                if (deallocated_sites.find(meta.q0) == deallocated_sites.end()) {
-                    sch_global.deallocate(mps_tensors[meta.q0]);
-                    deallocated_sites.insert(meta.q0);
+            std::set<IdxType> sites_to_update;
+            if (rank == 0) {
+              for (const auto& meta : all_metadata) {
+                if(meta.is_valid) {
+                  sites_to_update.insert(meta.q0);
+                  sites_to_update.insert(meta.q1);
                 }
-                if (deallocated_sites.find(meta.q1) == deallocated_sites.end()) {
-                    sch_global.deallocate(mps_tensors[meta.q1]);
-                    deallocated_sites.insert(meta.q1);
-                }
+              }
+            }
+            
+            // Broadcast the number of sites to update
+            int num_sites_to_update = sites_to_update.size();
+            MPI_Bcast(&num_sites_to_update, 1, MPI_INT, 0, pg.comm());
         
-                // Update the bond dimension state for the next layer
-                bond_dims[meta.q0 + 1] = meta.new_bond_dim;
-                tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
-                bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+            // Broadcast the actual sites
+            std::vector<IdxType> sites_vec(num_sites_to_update);
+            if (rank == 0) {
+              std::copy(sites_to_update.begin(), sites_to_update.end(), sites_vec.begin());
+            }
+            MPI_Bcast(sites_vec.data(), num_sites_to_update, MPI_UNSIGNED_LONG_LONG, 0, pg.comm());
+        
+            // All ranks now deallocate and re-tile the necessary bond spaces
+            for(const auto& site : sites_vec) {
+              tamm::IndexSpace is_new_bond{tamm::range(bond_dims[site + 1])};
+              bond_tis[site + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
             }
         
-            // --- PHASE 2: Allocate new tensors with the now-consistent dimensions ---
-            std::vector<tamm::Tensor<Cplx>> new_tensors;
-            new_tensors.reserve(deallocated_sites.size());
-        
-            // Use a map to create only one new tensor per site.
-            std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
-        
-            for(const auto& site : deallocated_sites) {
-                site_to_new_tensor.emplace(
-                    site,
-                    tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]}
-                );
-                site_to_new_tensor.at(site).set_dense();
-                sch_global.allocate(site_to_new_tensor.at(site));
+            std::map<IdxType, tamm::Tensor<Cplx>> new_tensors;
+            for(const auto& site : sites_vec) {
+              sch_global.deallocate(mps_tensors[site]);
+              new_tensors.emplace(site, tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]});
+              new_tensors.at(site).set_dense();
+              sch_global.allocate(new_tensors.at(site));
             }
-        
-            // Execute all deallocations and allocations collectively
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Executing deallocations and allocations..." << std::endl;
-            auto start_res_mgmt = std::chrono::high_resolution_clock::now();
+            
             sch_global.execute(exec_hw);
             auto end_res_mgmt = std::chrono::high_resolution_clock::now();
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
         
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
-        
-            // --- PHASE 3: Transfer data from compute ranks to new tensors ---
+            // ---------------------------------------------------------------------------------
+            // PHASE 4: Data transfer from compute ranks to new tensors.
+            // ---------------------------------------------------------------------------------
+            
             pg.barrier(); // Ensure allocations are visible everywhere before puts.
-        
+            
             int local_result_idx = 0;
-            for (const auto& meta : all_metadata) {
-                if (!meta.is_valid) continue;
-                
-                // The rank that computed the result now puts the data into the new global tensors
-                if (rank == meta.original_rank) {
-                    auto& result_data = local_results[local_result_idx++];
-                    assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
-        
-                    auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
-                    auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
-        
-                    //std::cout << "[RANK " << rank << "] apply_collective_updates: Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
-                    tamm::span<Cplx> t0_span{result_data.new_T0_data};
-                    tamm::span<Cplx> t1_span{result_data.new_T1_data};
+            if (rank == 0) {
+                for (const auto& meta : all_metadata) {
+                    if (!meta.is_valid) continue;
                     
-                    // Perform the put. This is a one-sided, blocking communication.
-                    // Note: This 'put' is timed inside the compute kernels in this design.
-                    // If it were a non-blocking put, we would time it here.
-                    new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), t0_span);
-                    new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), t1_span);
+                    // If the original rank is rank 0, do a local copy
+                    if (meta.original_rank == 0) {
+                        auto& result_data = local_results[local_result_idx++];
+                        new_tensors.at(meta.q0).put(*(new_tensors.at(meta.q0).loop_nest().begin()), result_data.new_T0_data);
+                        new_tensors.at(meta.q1).put(*(new_tensors.at(meta.q1).loop_nest().begin()), result_data.new_T1_data);
+                    } else {
+                        // Rank 0 receives data from the original rank and puts it into the tensor
+                        LocalGateResult remote_result;
+                        remote_result.new_T0_data.resize(new_tensors.at(meta.q0).size());
+                        remote_result.new_T1_data.resize(new_tensors.at(meta.q1).size());
+                        
+                        MPI_Recv(remote_result.new_T0_data.data(), remote_result.new_T0_data.size() * sizeof(Cplx), MPI_BYTE, meta.original_rank, meta.q0, pg.comm(), MPI_STATUS_IGNORE);
+                        MPI_Recv(remote_result.new_T1_data.data(), remote_result.new_T1_data.size() * sizeof(Cplx), MPI_BYTE, meta.original_rank, meta.q1, pg.comm(), MPI_STATUS_IGNORE);
+                        
+                        new_tensors.at(meta.q0).put(*(new_tensors.at(meta.q0).loop_nest().begin()), remote_result.new_T0_data);
+                        new_tensors.at(meta.q1).put(*(new_tensors.at(meta.q1).loop_nest().begin()), remote_result.new_T1_data);
+                    }
+                }
+            } else { // non-root ranks
+                for (const auto& meta : all_metadata) {
+                     if (!meta.is_valid) continue;
+        
+                     if (rank == meta.original_rank) {
+                        auto& result_data = local_results[local_result_idx++];
+                        MPI_Send(result_data.new_T0_data.data(), result_data.new_T0_data.size() * sizeof(Cplx), MPI_BYTE, 0, meta.q0, pg.comm());
+                        MPI_Send(result_data.new_T1_data.data(), result_data.new_T1_data.size() * sizeof(Cplx), MPI_BYTE, 0, meta.q1, pg.comm());
+                     }
                 }
             }
             
-            pg.barrier(); // Ensure all puts are complete.
+            pg.barrier(); // Ensure all data transfers are complete.
         
-            // --- PHASE 4: Update the main MPS state with the new tensors ---
-            for(auto const& [site, new_tensor] : site_to_new_tensor) {
+            // ---------------------------------------------------------------------------------
+            // PHASE 5: Update the main MPS state with the new tensors.
+            // ---------------------------------------------------------------------------------
+            for(auto const& [site, new_tensor] : new_tensors) {
                 mps_tensors[site] = new_tensor;
             }
-        
-            //std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
 
         // This function is now a "local kernel". It will be called via RPC
