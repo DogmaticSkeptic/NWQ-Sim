@@ -805,140 +805,103 @@ namespace NWQSim
             return all_metadata;
         }
 
-        // In the TN_TAM_class
         // In the TN_TAMM class
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
-            int world_size = pg.size().value();
+            //std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
         
             auto start_gather = std::chrono::high_resolution_clock::now();
-        
-            // ---------------------------------------------------------------------------------
-            // PHASE 1: Gather METADATA to the root process (rank 0). This is correct and efficient.
-            // ---------------------------------------------------------------------------------
-            
-            std::vector<GateUpdateMetadata> local_metadata;
-            local_metadata.reserve(local_results.size());
-            for(const auto& res : local_results) {
-                if (res.is_valid) {
-                    local_metadata.push_back({
-                        true, res.q0, res.q1, res.new_bond_dim, res.original_rank
-                    });
-                }
-            }
-        
-            int local_metadata_count = local_metadata.size();
-            std::vector<int> all_metadata_counts(world_size);
-        
-            MPI_Gather(&local_metadata_count, 1, MPI_INT, 
-                       all_metadata_counts.data(), 1, MPI_INT, 0, pg.comm());
-        
-            std::vector<GateUpdateMetadata> all_metadata;
-            if (rank == 0) {
-                std::vector<int> recv_counts_bytes(world_size);
-                std::vector<int> displs_bytes(world_size);
-                int total_updates = 0;
-                for (int i = 0; i < world_size; ++i) {
-                    recv_counts_bytes[i] = all_metadata_counts[i] * sizeof(GateUpdateMetadata);
-                    displs_bytes[i] = (i == 0) ? 0 : displs_bytes[i-1] + recv_counts_bytes[i-1];
-                    total_updates += all_metadata_counts[i];
-                }
-                all_metadata.resize(total_updates);
-                
-                MPI_Gatherv(local_metadata.data(), local_metadata_count * sizeof(GateUpdateMetadata), MPI_BYTE,
-                            all_metadata.data(), recv_counts_bytes.data(), displs_bytes.data(), 
-                            MPI_BYTE, 0, pg.comm());
-            } else {
-                MPI_Gatherv(local_metadata.data(), local_metadata_count * sizeof(GateUpdateMetadata), MPI_BYTE,
-                            nullptr, nullptr, nullptr, MPI_BYTE, 0, pg.comm());
-            }
-            
-            // ---------------------------------------------------------------------------------
-            // PHASE 2: Rank 0 processes metadata and BROADCASTS the final update plan.
-            // ---------------------------------------------------------------------------------
-            
-            std::set<IdxType> sites_to_update_set;
-            if (rank == 0) {
-                for (const auto& meta : all_metadata) {
-                    if (meta.is_valid) {
-                        bond_dims[meta.q0 + 1] = meta.new_bond_dim;
-                        sites_to_update_set.insert(meta.q0);
-                        sites_to_update_set.insert(meta.q1);
-                    }
-                }
-            }
-        
-            // Broadcast the updated bond_dims array to all processes.
-            MPI_Bcast(bond_dims.data(), bond_dims.size(), MPI_UNSIGNED_LONG_LONG, 0, pg.comm());
-        
-            // Broadcast the sites that need updating
-            int num_sites_to_update = sites_to_update_set.size();
-            MPI_Bcast(&num_sites_to_update, 1, MPI_INT, 0, pg.comm());
-        
-            std::vector<IdxType> sites_to_update_vec(num_sites_to_update);
-            if (rank == 0) {
-                std::copy(sites_to_update_set.begin(), sites_to_update_set.end(), sites_to_update_vec.begin());
-            }
-            MPI_Bcast(sites_to_update_vec.data(), num_sites_to_update, MPI_UNSIGNED_LONG_LONG, 0, pg.comm());
-        
+            auto all_metadata = allgather_metadata(local_results);
             auto end_gather = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_gather - start_gather);
+            
+            //std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
         
-            // ---------------------------------------------------------------------------------
-            // PHASE 3: All ranks collectively deallocate/re-tile/allocate tensors.
-            // ---------------------------------------------------------------------------------
-            auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             tamm::Scheduler sch_global{ec};
             
-            // All ranks now have the same plan and can update their TiledIndexSpaces consistently
-            for(const auto& site : sites_to_update_vec) {
-              tamm::IndexSpace is_new_bond{tamm::range(bond_dims[site + 1])};
-              bond_tis[site + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+            // --- PHASE 1: Deallocate old tensors and update bond dimension metadata ---
+            // A set to avoid duplicate deallocations if a qubit is touched multiple times (e.g., in a SWAP)
+            std::set<IdxType> deallocated_sites; 
+            for (const auto& meta : all_metadata)
+            {
+                if (!meta.is_valid) continue;
+                
+                if (deallocated_sites.find(meta.q0) == deallocated_sites.end()) {
+                    sch_global.deallocate(mps_tensors[meta.q0]);
+                    deallocated_sites.insert(meta.q0);
+                }
+                if (deallocated_sites.find(meta.q1) == deallocated_sites.end()) {
+                    sch_global.deallocate(mps_tensors[meta.q1]);
+                    deallocated_sites.insert(meta.q1);
+                }
+        
+                // Update the bond dimension state for the next layer
+                bond_dims[meta.q0 + 1] = meta.new_bond_dim;
+                tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
+                bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
             }
         
-            // A map to hold the newly created tensors before swapping them into the main MPS array
-            std::map<IdxType, tamm::Tensor<Cplx>> new_tensors;
-            for(const auto& site : sites_to_update_vec) {
-              sch_global.deallocate(mps_tensors[site]);
-              new_tensors.emplace(site, tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]});
-              new_tensors.at(site).set_dense();
-              sch_global.allocate(new_tensors.at(site));
+            // --- PHASE 2: Allocate new tensors with the now-consistent dimensions ---
+            std::vector<tamm::Tensor<Cplx>> new_tensors;
+            new_tensors.reserve(deallocated_sites.size());
+        
+            // Use a map to create only one new tensor per site.
+            std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
+        
+            for(const auto& site : deallocated_sites) {
+                site_to_new_tensor.emplace(
+                    site,
+                    tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]}
+                );
+                site_to_new_tensor.at(site).set_dense();
+                sch_global.allocate(site_to_new_tensor.at(site));
             }
-            
+        
+            // Execute all deallocations and allocations collectively
+            //std::cout << "[RANK " << rank << "] apply_collective_updates: Executing deallocations and allocations..." << std::endl;
+            auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             sch_global.execute(exec_hw);
             auto end_res_mgmt = std::chrono::high_resolution_clock::now();
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
         
-            // ---------------------------------------------------------------------------------
-            // PHASE 4: DECENTRALIZED data transfer using one-sided PUTs.
-            // ---------------------------------------------------------------------------------
-            pg.barrier(); // Barrier ensures all allocations are complete and visible across all ranks.
-            auto start_data_transfer = std::chrono::high_resolution_clock::now();
+            //std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
         
-            // Each rank that computed a result now directly puts its data into the new global tensor.
-            for (auto& result_data : local_results) {
-                if(result_data.is_valid) {
-                    auto& new_T0_ref = new_tensors.at(result_data.q0);
-                    auto& new_T1_ref = new_tensors.at(result_data.q1);
+            // --- PHASE 3: Transfer data from compute ranks to new tensors ---
+            pg.barrier(); // Ensure allocations are visible everywhere before puts.
+        
+            int local_result_idx = 0;
+            for (const auto& meta : all_metadata) {
+                if (!meta.is_valid) continue;
+                
+                // The rank that computed the result now puts the data into the new global tensors
+                if (rank == meta.original_rank) {
+                    auto& result_data = local_results[local_result_idx++];
+                    assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
+        
+                    auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
+                    auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
+        
+                    //std::cout << "[RANK " << rank << "] apply_collective_updates: Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
+                    tamm::span<Cplx> t0_span{result_data.new_T0_data};
+                    tamm::span<Cplx> t1_span{result_data.new_T1_data};
                     
-                    // This is a one-sided communication operation.
-                    new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), result_data.new_T0_data);
-                    new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), result_data.new_T1_data);
+                    // Perform the put. This is a one-sided, blocking communication.
+                    // Note: This 'put' is timed inside the compute kernels in this design.
+                    // If it were a non-blocking put, we would time it here.
+                    new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), t0_span);
+                    new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), t1_span);
                 }
             }
             
-            // Final barrier ensures all one-sided PUT operations are complete before proceeding.
-            pg.barrier();
-            auto end_data_transfer = std::chrono::high_resolution_clock::now();
-            total_data_movement_time += (end_data_transfer - start_data_transfer);
+            pg.barrier(); // Ensure all puts are complete.
         
-            // ---------------------------------------------------------------------------------
-            // PHASE 5: All ranks update their main MPS state with the new tensors.
-            // ---------------------------------------------------------------------------------
-            for(auto const& [site, new_tensor] : new_tensors) {
+            // --- PHASE 4: Update the main MPS state with the new tensors ---
+            for(auto const& [site, new_tensor] : site_to_new_tensor) {
                 mps_tensors[site] = new_tensor;
             }
+        
+            //std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
 
         // This function is now a "local kernel". It will be called via RPC
