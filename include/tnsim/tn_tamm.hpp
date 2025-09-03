@@ -251,6 +251,9 @@ namespace NWQSim
             total_synchronization_time = std::chrono::duration<double>(0.0);
             total_contraction_time = std::chrono::duration<double>(0.0);
             total_svd_time = std::chrono::duration<double>(0.0);
+            total_data_movement_time = std::chrono::duration<double>(0.0);
+            total_scheduling_time = std::chrono::duration<double>(0.0);
+            total_resource_management_time = std::chrono::duration<double>(0.0);
         
             IdxType original_gate_count = circuit->num_gates();
             std::vector<SVGate> gates = fuse_circuit_sv(circuit);
@@ -271,18 +274,35 @@ namespace NWQSim
                 std::cout << "-----------------------------------------------------" << std::endl;
                 std::cout << std::fixed << std::setprecision(6);
                 std::cout << "Total simulation time          : " << total_simulation_time.count() << " seconds." << std::endl;
-                std::cout << "Total synchronization time     : " << total_synchronization_time.count() << " seconds." << std::endl;
-                std::cout << "Total tensor contraction time  : " << total_contraction_time.count() << " seconds." << std::endl;
-                std::cout << "Total SVD execution time       : " << total_svd_time.count() << " seconds." << std::endl;
+                std::cout << "  - Total tensor contraction     : " << total_contraction_time.count() << " seconds." << std::endl;
+                std::cout << "  - Total SVD execution          : " << total_svd_time.count() << " seconds." << std::endl;
+                std::cout << "  - Total synchronization (barriers) : " << total_synchronization_time.count() << " seconds." << std::endl;
+                std::cout << "  - Total data movement (get/put/gather) : " << total_data_movement_time.count() << " seconds." << std::endl;
+                std::cout << "  - Total scheduling (gate layering) : " << total_scheduling_time.count() << " seconds." << std::endl;
+                std::cout << "  - Total resource management (alloc/dealloc) : " << total_resource_management_time.count() << " seconds." << std::endl;
+                
+                double accounted_time = total_contraction_time.count() +
+                                        total_svd_time.count() +
+                                        total_synchronization_time.count() +
+                                        total_data_movement_time.count() +
+                                        total_scheduling_time.count() +
+                                        total_resource_management_time.count();
+                
+                std::cout << "-----------------------------------------------------" << std::endl;
+                std::cout << "Total accounted time           : " << accounted_time << " seconds." << std::endl;
+                std::cout << "Unaccounted time               : " << total_simulation_time.count() - accounted_time << " seconds." << std::endl;
                 std::cout << "-----------------------------------------------------" << std::endl;
         
-                // Optional: You can still write the total time to a CSV if you wish
+                // Write the detailed timing breakdown to a CSV file
                 std::ofstream csv_file("timings.csv", std::ios::app);
                 if (csv_file.is_open()) {
                     csv_file << total_simulation_time.count() << ","
-                             << total_synchronization_time.count() << ","
                              << total_contraction_time.count() << ","
-                             << total_svd_time.count() << "\n";
+                             << total_svd_time.count() << ","
+                             << total_synchronization_time.count() << ","
+                             << total_data_movement_time.count() << ","
+                             << total_scheduling_time.count() << ","
+                             << total_resource_management_time.count() << "\n";
                     csv_file.close();
                 } else {
                     std::cerr << "Error: Unable to open timings.csv for writing." << std::endl;
@@ -510,6 +530,9 @@ namespace NWQSim
         std::chrono::duration<double> total_synchronization_time{0.0};
         std::chrono::duration<double> total_contraction_time{0.0};
         std::chrono::duration<double> total_svd_time{0.0};
+        std::chrono::duration<double> total_data_movement_time{0.0};
+        std::chrono::duration<double> total_scheduling_time{0.0};
+        std::chrono::duration<double> total_resource_management_time{0.0};
 
         // In the TN_TAMM class
         
@@ -539,6 +562,7 @@ namespace NWQSim
             // STAGE 2: Parallel Execution of Unitary Gates
             // ************************************************************************
             if (!parallel_gates.empty()) {
+                auto start_scheduling = std::chrono::high_resolution_clock::now();
                 // PASS 1: Decompose non-local gates into sequences of local SWAPs.
                 std::vector<SVGate> flat_gates;
                 flat_gates.reserve(parallel_gates.size() * 2); // Pre-allocate memory
@@ -586,6 +610,8 @@ namespace NWQSim
                         place_c2(g, g.ctrl, g.qubit, layers, last_layer_map);
                     }
                 }
+                auto end_scheduling = std::chrono::high_resolution_clock::now();
+                total_scheduling_time += (end_scheduling - start_scheduling);
         
                 pg.barrier();
         
@@ -784,7 +810,11 @@ namespace NWQSim
             int rank = pg.rank().value();
             //std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
         
+            auto start_gather = std::chrono::high_resolution_clock::now();
             auto all_metadata = allgather_metadata(local_results);
+            auto end_gather = std::chrono::high_resolution_clock::now();
+            total_data_movement_time += (end_gather - start_gather);
+            
             //std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
         
             tamm::Scheduler sch_global{ec};
@@ -829,7 +859,11 @@ namespace NWQSim
         
             // Execute all deallocations and allocations collectively
             //std::cout << "[RANK " << rank << "] apply_collective_updates: Executing deallocations and allocations..." << std::endl;
+            auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             sch_global.execute(exec_hw);
+            auto end_res_mgmt = std::chrono::high_resolution_clock::now();
+            total_resource_management_time += (end_res_mgmt - start_res_mgmt);
+        
             //std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
         
             // --- PHASE 3: Transfer data from compute ranks to new tensors ---
@@ -852,6 +886,8 @@ namespace NWQSim
                     tamm::span<Cplx> t1_span{result_data.new_T1_data};
                     
                     // Perform the put. This is a one-sided, blocking communication.
+                    // Note: This 'put' is timed inside the compute kernels in this design.
+                    // If it were a non-blocking put, we would time it here.
                     new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), t0_span);
                     new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), t1_span);
                 }
@@ -904,11 +940,13 @@ namespace NWQSim
                 buf[0] = U[pout * 2 + pin];
             };
             tamm::update_tensor(G, fill_g);
-        
+
+            auto start_get = std::chrono::high_resolution_clock::now();
             std::vector<Cplx> t_in_buf(T_in.size());
             target_tensor.get(*(target_tensor.loop_nest().begin()), t_in_buf);
             T_in.put(*(T_in.loop_nest().begin()), t_in_buf);
-        
+            auto end_get = std::chrono::high_resolution_clock::now();
+            total_data_movement_time += (end_get - start_get);
             // 7. Perform the contraction locally.
             auto start_contraction = std::chrono::high_resolution_clock::now();
             sch_local(T_new("l","p'","r") = G("p'","p") * T_in("l","p","r")).execute(exec_hw);
@@ -922,7 +960,10 @@ namespace NWQSim
             T_new.get(*(T_new.loop_nest().begin()), t_out_buf);
         
             // 9. Put the result back into the original global tensor.
+            auto start_put = std::chrono::high_resolution_clock::now();
             target_tensor.put(*(target_tensor.loop_nest().begin()), t_out_buf);
+            auto end_put = std::chrono::high_resolution_clock::now();
+            total_data_movement_time += (end_put - start_put);
         
             // 10. Clean up local resources.
             sch_local.deallocate(G, T_new, T_in).execute(exec_hw);
@@ -943,6 +984,8 @@ namespace NWQSim
             tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
             T0_local.set_dense(); T1_local.set_dense();
             sch_local.allocate(T0_local, T1_local).execute(exec_hw);
+
+            auto start_get = std::chrono::high_resolution_clock::now();
         
             // 3. GET data from the global mps_tensors into local std::vectors, then PUT to local tensors.
             std::vector<Cplx> t0_buf(T0_local.size());
@@ -952,6 +995,9 @@ namespace NWQSim
             std::vector<Cplx> t1_buf(T1_local.size());
             mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
             T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
+
+            auto end_get = std::chrono::high_resolution_clock::now();
+            total_data_movement_time += (end_get - start_get);
             
             // 4. Perform local computations using the local scheduler.
             tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
