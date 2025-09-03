@@ -815,7 +815,7 @@ namespace NWQSim
             auto start_gather = std::chrono::high_resolution_clock::now();
         
             // ---------------------------------------------------------------------------------
-            // PHASE 1: Gather METADATA to the root process (rank 0).
+            // PHASE 1: Gather METADATA to the root process (rank 0). This is correct and efficient.
             // ---------------------------------------------------------------------------------
             
             std::vector<GateUpdateMetadata> local_metadata;
@@ -831,81 +831,75 @@ namespace NWQSim
             int local_metadata_count = local_metadata.size();
             std::vector<int> all_metadata_counts(world_size);
         
-            // Gather the NUMBER OF STRUCTS from each rank.
             MPI_Gather(&local_metadata_count, 1, MPI_INT, 
                        all_metadata_counts.data(), 1, MPI_INT, 0, pg.comm());
         
             std::vector<GateUpdateMetadata> all_metadata;
-            std::vector<int> recv_counts_bytes;
-            std::vector<int> displacements_bytes;
-        
             if (rank == 0) {
-                int total_updates = std::accumulate(all_metadata_counts.begin(), all_metadata_counts.end(), 0);
-                all_metadata.resize(total_updates);
-        
-                recv_counts_bytes.resize(world_size);
-                displacements_bytes.resize(world_size);
-                
+                std::vector<int> recv_counts_bytes(world_size);
+                std::vector<int> displs_bytes(world_size);
+                int total_updates = 0;
                 for (int i = 0; i < world_size; ++i) {
-                    // CRITICAL FIX: Convert struct counts to byte counts for MPI_Gatherv.
                     recv_counts_bytes[i] = all_metadata_counts[i] * sizeof(GateUpdateMetadata);
-                    displacements_bytes[i] = (i == 0) ? 0 : displacements_bytes[i-1] + recv_counts_bytes[i-1];
+                    displs_bytes[i] = (i == 0) ? 0 : displs_bytes[i-1] + recv_counts_bytes[i-1];
+                    total_updates += all_metadata_counts[i];
                 }
+                all_metadata.resize(total_updates);
+                
+                MPI_Gatherv(local_metadata.data(), local_metadata_count * sizeof(GateUpdateMetadata), MPI_BYTE,
+                            all_metadata.data(), recv_counts_bytes.data(), displs_bytes.data(), 
+                            MPI_BYTE, 0, pg.comm());
+            } else {
+                MPI_Gatherv(local_metadata.data(), local_metadata_count * sizeof(GateUpdateMetadata), MPI_BYTE,
+                            nullptr, nullptr, nullptr, MPI_BYTE, 0, pg.comm());
             }
             
-            // Use MPI_Gatherv with byte counts.
-            MPI_Gatherv(local_metadata.data(), local_metadata_count * sizeof(GateUpdateMetadata), MPI_BYTE,
-                        all_metadata.data(), recv_counts_bytes.data(), displacements_bytes.data(), 
-                        MPI_BYTE, 0, pg.comm());
-        
             // ---------------------------------------------------------------------------------
-            // PHASE 2: Rank 0 processes metadata and broadcasts the update plan.
+            // PHASE 2: Rank 0 processes metadata and BROADCASTS the final update plan.
             // ---------------------------------------------------------------------------------
             
+            std::set<IdxType> sites_to_update_set;
             if (rank == 0) {
                 for (const auto& meta : all_metadata) {
                     if (meta.is_valid) {
                         bond_dims[meta.q0 + 1] = meta.new_bond_dim;
+                        sites_to_update_set.insert(meta.q0);
+                        sites_to_update_set.insert(meta.q1);
                     }
                 }
             }
-            
+        
+            // Broadcast the updated bond_dims array to all processes.
             MPI_Bcast(bond_dims.data(), bond_dims.size(), MPI_UNSIGNED_LONG_LONG, 0, pg.comm());
+        
+            // Broadcast the sites that need updating
+            int num_sites_to_update = sites_to_update_set.size();
+            MPI_Bcast(&num_sites_to_update, 1, MPI_INT, 0, pg.comm());
+        
+            std::vector<IdxType> sites_to_update_vec(num_sites_to_update);
+            if (rank == 0) {
+                std::copy(sites_to_update_set.begin(), sites_to_update_set.end(), sites_to_update_vec.begin());
+            }
+            MPI_Bcast(sites_to_update_vec.data(), num_sites_to_update, MPI_UNSIGNED_LONG_LONG, 0, pg.comm());
+        
             auto end_gather = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_gather - start_gather);
-            
+        
             // ---------------------------------------------------------------------------------
-            // PHASE 3: Collective resource management (deallocation and allocation).
+            // PHASE 3: All ranks collectively deallocate/re-tile/allocate tensors.
             // ---------------------------------------------------------------------------------
             auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             tamm::Scheduler sch_global{ec};
             
-            std::set<IdxType> sites_to_update;
-            if (rank == 0) {
-              for (const auto& meta : all_metadata) {
-                if(meta.is_valid) {
-                  sites_to_update.insert(meta.q0);
-                  sites_to_update.insert(meta.q1);
-                }
-              }
-            }
-            
-            int num_sites_to_update = sites_to_update.size();
-            MPI_Bcast(&num_sites_to_update, 1, MPI_INT, 0, pg.comm());
-        
-            std::vector<IdxType> sites_vec(num_sites_to_update);
-            if (rank == 0) {
-              std::copy(sites_to_update.begin(), sites_to_update.end(), sites_vec.begin());
-            }
-            MPI_Bcast(sites_vec.data(), num_sites_to_update, MPI_UNSIGNED_LONG_LONG, 0, pg.comm());
-        
-            for(const auto& site : sites_vec) {
+            // All ranks now have the same plan and can update their TiledIndexSpaces consistently
+            for(const auto& site : sites_to_update_vec) {
               tamm::IndexSpace is_new_bond{tamm::range(bond_dims[site + 1])};
               bond_tis[site + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
             }
         
+            // A map to hold the newly created tensors before swapping them into the main MPS array
             std::map<IdxType, tamm::Tensor<Cplx>> new_tensors;
-            for(const auto& site : sites_vec) {
+            for(const auto& site : sites_to_update_vec) {
               sch_global.deallocate(mps_tensors[site]);
               new_tensors.emplace(site, tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]});
               new_tensors.at(site).set_dense();
@@ -917,86 +911,30 @@ namespace NWQSim
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
         
             // ---------------------------------------------------------------------------------
-            // PHASE 4: EFFICIENT data transfer using Gatherv for both new tensors.
+            // PHASE 4: DECENTRALIZED data transfer using one-sided PUTs.
             // ---------------------------------------------------------------------------------
-            pg.barrier(); 
+            pg.barrier(); // Barrier ensures all allocations are complete and visible across all ranks.
             auto start_data_transfer = std::chrono::high_resolution_clock::now();
         
-            // Rank 0 determines the layout for the Gatherv operations
-            std::vector<int> t0_recv_counts_bytes, t0_displs_bytes;
-            std::vector<int> t1_recv_counts_bytes, t1_displs_bytes;
-            size_t total_t0_bytes = 0;
-            size_t total_t1_bytes = 0;
-        
-            if (rank == 0) {
-                t0_recv_counts_bytes.resize(world_size, 0);
-                t1_recv_counts_bytes.resize(world_size, 0);
-                t0_displs_bytes.resize(world_size, 0);
-                t1_displs_bytes.resize(world_size, 0);
-                
-                for(const auto& meta : all_metadata) {
-                    if(meta.is_valid) {
-                        size_t t0_size = new_tensors.at(meta.q0).size();
-                        size_t t1_size = new_tensors.at(meta.q1).size();
-                        t0_recv_counts_bytes[meta.original_rank] += t0_size * sizeof(Cplx);
-                        t1_recv_counts_bytes[meta.original_rank] += t1_size * sizeof(Cplx);
-                    }
-                }
-        
-                for(int i = 1; i < world_size; ++i) {
-                    t0_displs_bytes[i] = t0_displs_bytes[i-1] + t0_recv_counts_bytes[i-1];
-                    t1_displs_bytes[i] = t1_displs_bytes[i-1] + t1_recv_counts_bytes[i-1];
-                }
-                total_t0_bytes = t0_displs_bytes.back() + t0_recv_counts_bytes.back();
-                total_t1_bytes = t1_displs_bytes.back() + t1_recv_counts_bytes.back();
-            }
-            
-            // Gather all T0 data to rank 0
-            std::vector<Cplx> local_t0_data, local_t1_data;
-            for(const auto& res : local_results) {
-                local_t0_data.insert(local_t0_data.end(), res.new_T0_data.begin(), res.new_T0_data.end());
-                local_t1_data.insert(local_t1_data.end(), res.new_T1_data.begin(), res.new_T1_data.end());
-            }
-        
-            std::vector<Cplx> all_t0_data(total_t0_bytes / sizeof(Cplx));
-            MPI_Gatherv(local_t0_data.data(), local_t0_data.size() * sizeof(Cplx), MPI_BYTE,
-                        all_t0_data.data(), t0_recv_counts_bytes.data(), t0_displs_bytes.data(), 
-                        MPI_BYTE, 0, pg.comm());
-        
-            // Gather all T1 data to rank 0
-            std::vector<Cplx> all_t1_data(total_t1_bytes / sizeof(Cplx));
-            MPI_Gatherv(local_t1_data.data(), local_t1_data.size() * sizeof(Cplx), MPI_BYTE,
-                        all_t1_data.data(), t1_recv_counts_bytes.data(), t1_displs_bytes.data(), 
-                        MPI_BYTE, 0, pg.comm());
-        
-            // Rank 0 puts the data into the correct global tensors
-            if (rank == 0) {
-                size_t t0_offset = 0;
-                size_t t1_offset = 0;
-                for(const auto& meta : all_metadata) {
-                    if(meta.is_valid) {
-                        auto& new_T0_ref = new_tensors.at(meta.q0);
-                        auto& new_T1_ref = new_tensors.at(meta.q1);
-                        
-                        tamm::span<Cplx> t0_span{&all_t0_data[t0_offset], new_T0_ref.size()};
-                        tamm::span<Cplx> t1_span{&all_t1_data[t1_offset], new_T1_ref.size()};
-                        
-                        new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), t0_span);
-                        new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), t1_span);
-        
-                        t0_offset += new_T0_ref.size();
-                        t1_offset += new_T1_ref.size();
-                    }
+            // Each rank that computed a result now directly puts its data into the new global tensor.
+            for (const auto& result_data : local_results) {
+                if(result_data.is_valid) {
+                    auto& new_T0_ref = new_tensors.at(result_data.q0);
+                    auto& new_T1_ref = new_tensors.at(result_data.q1);
+                    
+                    // This is a one-sided communication operation.
+                    new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), result_data.new_T0_data);
+                    new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), result_data.new_T1_data);
                 }
             }
             
+            // Final barrier ensures all one-sided PUT operations are complete before proceeding.
+            pg.barrier();
             auto end_data_transfer = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_data_transfer - start_data_transfer);
-            
-            pg.barrier();
         
             // ---------------------------------------------------------------------------------
-            // PHASE 5: Update the main MPS state with the new tensors.
+            // PHASE 5: All ranks update their main MPS state with the new tensors.
             // ---------------------------------------------------------------------------------
             for(auto const& [site, new_tensor] : new_tensors) {
                 mps_tensors[site] = new_tensor;
