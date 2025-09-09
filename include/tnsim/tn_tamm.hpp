@@ -654,19 +654,19 @@ namespace NWQSim
                 //std::cout << "---------- STARTING SEQUENTIAL GATES ----------" << std::endl;
             //}
         
-            //for (const auto &g : sequential_gates) {
-            //    if (g.op_name == OP::RESET) {
-            //        RESET_GATE(g.qubit);
-            //    } else if (g.op_name == OP::M) {
-            //        M_GATE(g.qubit);
-            //    } else if (g.op_name == OP::MA) {
-            //        MA_GATE(g.qubit); 
-            //    }
-            //}
+            for (const auto &g : sequential_gates) {
+                if (g.op_name == OP::RESET) {
+                    RESET_GATE(g.qubit);
+                } else if (g.op_name == OP::M) {
+                    M_GATE(g.qubit);
+                } else if (g.op_name == OP::MA) {
+                    MA_GATE(g.qubit); 
+                }
+            }
         
-            //if (rank == 0 && !sequential_gates.empty()) {
-                //std::cout << "---------- FINISHED SEQUENTIAL GATES ----------" << std::endl;
-            //}
+            if (rank == 0 && !sequential_gates.empty()) {
+              //std::cout << "---------- FINISHED SEQUENTIAL GATES ----------" << std::endl;
+            }
         
             pg.barrier(); // Final sync after all operations.
             //if (rank == 0) //std::cout << "<== Exiting simulation_kernel." << std::endl;
