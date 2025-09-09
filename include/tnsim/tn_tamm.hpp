@@ -64,8 +64,8 @@ namespace NWQSim
         bool is_valid = false;
         IdxType q0, q1;
         IdxType new_bond_dim;
-        std::vector<Cplx> new_T0_data; // Raw data, not a TAMM tensor
-        std::vector<Cplx> new_T1_data; // Raw data, not a TAMM tensor
+        std::vector<Cplx> new_T0_data;
+        std::vector<Cplx> new_T1_data;
         int original_rank;
     };
 
@@ -80,7 +80,7 @@ namespace NWQSim
         bool is_valid = false;
         IdxType q0, q1;
         IdxType new_bond_dim;
-        int original_rank; // The rank that computed this result
+        int original_rank;
     };
 
     struct CuCtx {
@@ -120,7 +120,6 @@ namespace NWQSim
             pg(init_pg()),
             ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga)
         {
-            // set the i_proc to prevent repeat prints
             i_proc = pg.rank().value();
             
             // print the tamm execution context, this can be commented out if desired
@@ -140,7 +139,7 @@ namespace NWQSim
                 ec.print_mem_info();
                 std::cout << std::endl;
             }
-            // change between cpu or gpu tensor contraction
+
             if (backend == "TN_TAMM_CPU")
             {
                 exec_hw = tamm::ExecutionHW::CPU;
@@ -217,7 +216,6 @@ namespace NWQSim
         }
 
         void reset_state() override {
-            //printf("Inside reset gate\n");
             for(IdxType i = 0; i < n_qubits; ++i)
             {
                 auto& T = mps_tensors[i];
