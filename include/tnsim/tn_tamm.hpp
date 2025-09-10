@@ -944,85 +944,98 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] <-- C1_GATE_local_kernel on qubit " << q_idx << " finished." << std::endl;
         }
 
-        // This function now returns a struct containing the new data and metadata
+
+        // Replace the existing C2_GATE_COMPUTE function with this one
         LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
             std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1
-                      << "): Passed pre-computation barrier. Starting local computation." << std::endl;
+                      << "): Starting local computation." << std::endl;
         
-            // 1. Create a truly local execution context for this one-shot computation.
+            // 1. Local execution environment setup
             tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
             tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
             tamm::Scheduler sch_local{ec_local};
         
-            // 2. Create LOCAL tensors for inputs and intermediates.
-            tamm::Tensor<Cplx> T0_local({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
-            tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
-            T0_local.set_dense(); T1_local.set_dense();
-            sch_local.allocate(T0_local, T1_local).execute(exec_hw);
+            // 2. Get dimensions
+            const IdxType phys_dim = 2;
+            IdxType Dl = bond_dims[q0];
+            IdxType Db = bond_dims[q0 + 1];
+            IdxType Dr = bond_dims[q1 + 1];
         
+            // 3. Get input tensor data from global state
             auto start_get = std::chrono::high_resolution_clock::now();
-        
-            // 3. GET data from the global mps_tensors into local std::vectors, then PUT to local tensors.
-            std::vector<Cplx> t0_buf(T0_local.size());
+            std::vector<Cplx> t0_buf(Dl * phys_dim * Db);
             mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
-        
-            // +++ DIAGNOSTIC BLOCK +++
-            std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1
-                      << "): GOT INPUT TENSORS (post-barrier)" << std::endl;
-            print_buffer_diag("INPUT ", q0, t0_buf);
-            // +++ END DIAGNOSTIC BLOCK +++
-        
-            T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
-        
-            std::vector<Cplx> t1_buf(T1_local.size());
+            
+            std::vector<Cplx> t1_buf(Db * phys_dim * Dr);
             mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
-        
-            // +++ DIAGNOSTIC BLOCK +++
-            print_buffer_diag("INPUT ", q1, t1_buf);
-            // +++ END DIAGNOSTIC BLOCK +++
-        
-            T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
-        
             auto end_get = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_get - start_get);
         
-            // 4. Perform local computations using the local scheduler.
-            tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
-            tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
-            tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
-            M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
-            sch_local.allocate(M_local, G4_local, M2_local).execute(exec_hw);
-        
+            print_buffer_diag("INPUT ", q0, t0_buf);
+            print_buffer_diag("INPUT ", q1, t1_buf);
+            
+            // 4. Perform Contraction using EIGEN
             auto start_contraction = std::chrono::high_resolution_clock::now();
+            
+            // Reshape T0 and T1 into 2D Eigen matrices
+            Eigen::Map<Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
+                T0_mat(t0_buf.data(), Dl * phys_dim, Db);
         
-            sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
+            Eigen::Map<Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
+                T1_mat(t1_buf.data(), Db, phys_dim * Dr);
         
-            auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
-                auto offsets = G4_local.block_offsets(bid);
-                int p0p = offsets[0], p1p = offsets[1], p0 = offsets[2], p1 = offsets[3];
-                buf[0] = U4[(p0p * 2 + p1p) * 4 + (p0 * 2 + p1)];
-            };
-            tamm::update_tensor(G4_local, fill_g4);
+            // M(l,p0,p1,r) = T0(l,p0,b) * T1(b,p1,r)
+            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> M_mat = T0_mat * T1_mat;
+            
+            // Now M_mat holds the result of the contraction, with shape (Dl*p0) x (p1*Dr)
+            
+            // Apply the 2-qubit gate U4
+            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> M2_mat(Dl * phys_dim, phys_dim * Dr);
+            Eigen::Map<Eigen::Matrix<Cplx, 4, 4, Eigen::RowMajor>> G_mat(const_cast<Cplx*>(U4.data()));
         
-            sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
+            for(IdxType l=0; l<Dl; ++l) {
+                for(IdxType r=0; r<Dr; ++r) {
+                    // Extract the 2x2 submatrix for this l,r pair
+                    Eigen::Matrix<Cplx, 2, 2> m_slice;
+                    for(int p0=0; p0<2; ++p0) {
+                        for(int p1=0; p1<2; ++p1) {
+                            m_slice(p0, p1) = M_mat(l*phys_dim + p0, p1*Dr + r);
+                        }
+                    }
         
+                    // Apply the gate: m' = G * m
+                    // Eigen stores G in column-major, so we need to transpose it
+                    // Reshape m_slice to a 4x1 vector to match G
+                    Eigen::Map<Eigen::Matrix<Cplx, 4, 1>> m_vec(m_slice.data());
+                    Eigen::Matrix<Cplx, 4, 1> m_prime_vec = G_mat.transpose() * m_vec;
+        
+                    // Put the result back into the M2 matrix
+                    for(int p0p=0; p0p<2; ++p0p) {
+                        for(int p1p=0; p1p<2; ++p1p) {
+                            M2_mat(l*phys_dim + p0p, p1p*Dr + r) = m_prime_vec(p0p*2 + p1p);
+                        }
+                    }
+                }
+            }
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
+            
+            // Create a temporary TAMM tensor to pass to the SVD function
+            tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+            M2_local.set_dense();
+            sch_local.allocate(M2_local).execute(exec_hw);
+            M2_local.put(*(M2_local.loop_nest().begin()), {M2_mat.data(), (size_t)M2_mat.size()});
         
-            // 5. Perform SVD on the local M2_local tensor.
+            // 5. Perform SVD on the result
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
         
-            // +++ DIAGNOSTIC BLOCK +++
-            std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1
-                      << "): PRODUCED OUTPUT TENSORS" << std::endl;
             print_buffer_diag("OUTPUT", q0, Ti_new_data);
             print_buffer_diag("OUTPUT", q1, Tj_new_data);
-            // +++ END DIAGNOSTIC BLOCK +++
         
-            // 6. Package the results into the POD struct.
+            // 6. Package results and clean up
             LocalGateResult result;
             result.is_valid = true;
             result.q0 = q0;
@@ -1032,14 +1045,109 @@ namespace NWQSim
             result.new_T1_data = std::move(Tj_new_data);
             result.original_rank = rank;
         
-            // 7. Clean up all temporary local resources.
-            sch_local.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
+            sch_local.deallocate(M2_local).execute(exec_hw);
             self_pg.destroy_coll();
-        
+            
             std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1 << "): Finished." << std::endl;
-        
             return result;
         }
+
+//        // This function now returns a struct containing the new data and metadata
+//        LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
+//        {
+//            int rank = pg.rank().value();
+//            std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1
+//                      << "): Passed pre-computation barrier. Starting local computation." << std::endl;
+//        
+//            // 1. Create a truly local execution context for this one-shot computation.
+//            tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
+//            tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
+//            tamm::Scheduler sch_local{ec_local};
+//        
+//            // 2. Create LOCAL tensors for inputs and intermediates.
+//            tamm::Tensor<Cplx> T0_local({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
+//            tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
+//            T0_local.set_dense(); T1_local.set_dense();
+//            sch_local.allocate(T0_local, T1_local).execute(exec_hw);
+//        
+//            auto start_get = std::chrono::high_resolution_clock::now();
+//        
+//            // 3. GET data from the global mps_tensors into local std::vectors, then PUT to local tensors.
+//            std::vector<Cplx> t0_buf(T0_local.size());
+//            mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
+//        
+//            // +++ DIAGNOSTIC BLOCK +++
+//            std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1
+//                      << "): GOT INPUT TENSORS (post-barrier)" << std::endl;
+//            print_buffer_diag("INPUT ", q0, t0_buf);
+//            // +++ END DIAGNOSTIC BLOCK +++
+//        
+//            T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
+//        
+//            std::vector<Cplx> t1_buf(T1_local.size());
+//            mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
+//        
+//            // +++ DIAGNOSTIC BLOCK +++
+//            print_buffer_diag("INPUT ", q1, t1_buf);
+//            // +++ END DIAGNOSTIC BLOCK +++
+//        
+//            T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
+//        
+//            auto end_get = std::chrono::high_resolution_clock::now();
+//            total_data_movement_time += (end_get - start_get);
+//        
+//            // 4. Perform local computations using the local scheduler.
+//            tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+//            tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
+//            tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+//            M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
+//            sch_local.allocate(M_local, G4_local, M2_local).execute(exec_hw);
+//        
+//            auto start_contraction = std::chrono::high_resolution_clock::now();
+//        
+//            sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
+//        
+//            auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
+//                auto offsets = G4_local.block_offsets(bid);
+//                int p0p = offsets[0], p1p = offsets[1], p0 = offsets[2], p1 = offsets[3];
+//                buf[0] = U4[(p0p * 2 + p1p) * 4 + (p0 * 2 + p1)];
+//            };
+//            tamm::update_tensor(G4_local, fill_g4);
+//        
+//            sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
+//        
+//            auto end_contraction = std::chrono::high_resolution_clock::now();
+//            total_contraction_time += (end_contraction - start_contraction);
+//        
+//            // 5. Perform SVD on the local M2_local tensor.
+//            std::vector<Cplx> Ti_new_data, Tj_new_data;
+//            IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
+//        
+//            // +++ DIAGNOSTIC BLOCK +++
+//            std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1
+//                      << "): PRODUCED OUTPUT TENSORS" << std::endl;
+//            print_buffer_diag("OUTPUT", q0, Ti_new_data);
+//            print_buffer_diag("OUTPUT", q1, Tj_new_data);
+//            // +++ END DIAGNOSTIC BLOCK +++
+//        
+//            // 6. Package the results into the POD struct.
+//            LocalGateResult result;
+//            result.is_valid = true;
+//            result.q0 = q0;
+//            result.q1 = q1;
+//            result.new_bond_dim = new_bond_dim;
+//            result.new_T0_data = std::move(Ti_new_data);
+//            result.new_T1_data = std::move(Tj_new_data);
+//            result.original_rank = rank;
+//        
+//            // 7. Clean up all temporary local resources.
+//            sch_local.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
+//            self_pg.destroy_coll();
+//        
+//            std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1 << "): Finished." << std::endl;
+//        
+//            return result;
+//        }
 
         void gpu_svd_jacobi(
             const Cplx* A_h, int m, int n,
