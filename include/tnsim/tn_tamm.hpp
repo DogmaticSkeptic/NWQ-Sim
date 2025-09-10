@@ -1088,6 +1088,14 @@ namespace NWQSim
             // Since G4_local is small and local, it has one block. We put the entire buffer into it.
             G4_local.put(*(G4_local.loop_nest().begin()), g4_buf);
             // *** END CORRECTION ***
+            //
+            std::cout << "[PARALLEL GATE DIAG RANK " << rank << "] Gate buffer g4_buf for qubits (" 
+                      << q0 << ", " << q1 << ") has " << g4_buf.size() << " elements:" << std::endl;
+            for(size_t i = 0; i < g4_buf.size(); ++i) {
+                std::cout << "(" << g4_buf[i].real() << "," << g4_buf[i].imag() << ") ";
+                if ((i + 1) % 4 == 0) std::cout << std::endl; // For readability
+            }
+            std::cout << std::endl;
 
             sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
         
@@ -1238,24 +1246,18 @@ namespace NWQSim
             std::vector<Cplx> M2_hostbuf(M2_local.size());
             M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
         
-            for (Eigen::Index j = 0; j < n; ++j) {      // Iterate over columns (Eigen's fast index)
-                for (Eigen::Index i = 0; i < m; ++i) {  // Iterate over rows (Eigen's slow index)
-                    
-                    // Deconstruct the matrix indices (i, j) back to tensor indices (l, p0, p1, r)
-                    IdxType l  = i / phys_dim;
-                    IdxType p0 = i % phys_dim;
-                    IdxType p1 = j / Dr;
-                    IdxType r  = j % Dr;
-            
-                    // Calculate the corresponding 1D index in the row-major M2_hostbuf
-                    size_t host_buf_idx = (l * phys_dim * phys_dim * Dr) + 
-                                          (p0 * phys_dim * Dr) + 
-                                          (p1 * Dr) + 
-                                          r;
-            
-                    mat(i, j) = M2_hostbuf[host_buf_idx];
+            size_t c = 0;
+            for (size_t l = 0; l < Dl; ++l) {
+                for (size_t p0 = 0; p0 < phys_dim; ++p0) {
+                    for (size_t p1 = 0; p1 < phys_dim; ++p1) {
+                        for (size_t r = 0; r < Dr; ++r, ++c) {
+                            // Eigen's operator() handles the column-major layout automatically.
+                            mat(l * phys_dim + p0, p1 * Dr + r) = M2_hostbuf[c];
+                        }
+                    }
                 }
-            }            
+            }
+
 //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Reshape to Eigen matrix complete." << std::endl;
             
             // 3. Compute the SVD using Eigen's robust BDCSVD.
