@@ -1269,8 +1269,38 @@ namespace NWQSim
             if (chi == 0 && svals.size() > 0) {
                 chi = 1; // Prevent bond dimension from ever becoming zero.
             }
-            //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
-        
+
+            std::cout << "\n[PARALLEL SVD DIAG RANK " << rank << "] Qubits (" << q0 << ", " << q1 
+                      << "), chi=" << chi << std::endl;
+            
+            // Print singular values
+            std::cout << "  Singular values: ";
+            for (IdxType k = 0; k < chi; ++k) {
+                std::cout << svals(keep[k]) << " ";
+            }
+            std::cout << std::endl;
+            
+            // Extract and print first few elements of Umat and Vh
+            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat_dbg(mat.rows(), chi);
+            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Vh_dbg(chi, mat.cols());
+            for (IdxType k = 0; k < chi; ++k) {
+                IdxType i = keep[k];
+                Umat_dbg.col(k) = svd.matrixU().col(i);
+                Vh_dbg.row(k)   = svd.matrixV().col(i).adjoint();
+            }
+            
+            std::cout << "  Umat (first 4): ";
+            for(int i=0; i < std::min((long)4, Umat_dbg.size()); ++i) {
+                std::cout << "(" << Umat_dbg.data()[i].real() << "," << Umat_dbg.data()[i].imag() << ") ";
+            }
+            std::cout << std::endl;
+            
+            std::cout << "  Vh (first 4): ";
+            for(int i=0; i < std::min((long)4, Vh_dbg.size()); ++i) {
+                std::cout << "(" << Vh_dbg.data()[i].real() << "," << Vh_dbg.data()[i].imag() << ") ";
+            }
+            std::cout << std::endl << std::endl;
+
             // 5. Extract the truncated U, S, and Vh matrices.
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat(mat.rows(), chi);
             Eigen::Matrix<Cplx, Eigen::Dynamic, 1> kept_svals(chi);
