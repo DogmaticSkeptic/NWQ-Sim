@@ -701,12 +701,36 @@ namespace NWQSim
             
             IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
             if (i_proc == 0) {
-                printf("  - Truncation details:\n");
-                printf("    - sv_cutoff = %.1e, max_bond_dim = %lld\n", sv_cutoff, max_bond_dim);
-                printf("    - Singular values kept after cutoff: %zu\n", keep.size());
-                printf("    - Final new bond dimension (chi): %lld\n", chi);
-            }
+                printf("\n[SEQUENTIAL SVD DIAG] Qubits (%lld, %lld), chi=%lld\n", q0, q1, chi);
+                
+                // Print singular values
+                printf("  Singular values: ");
+                for (IdxType k = 0; k < chi; ++k) {
+                    printf("%.6f ", std::abs(svals(keep[k])));
+                }
+                printf("\n");
             
+                // Extract and print first few elements of Umat and Vh
+                Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat_dbg(mat.rows(), chi);
+                Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Vh_dbg(chi, mat.cols());
+                for (IdxType k = 0; k < chi; ++k) {
+                    IdxType i = keep[k];
+                    Umat_dbg.col(k) = svd.matrixU().col(i);
+                    Vh_dbg.row(k)   = svd.matrixV().col(i).adjoint();
+                }
+                
+                printf("  Umat (first 4): ");
+                for(int i=0; i < std::min((long)4, Umat_dbg.size()); ++i) {
+                    printf("(%.3f,%.3f) ", Umat_dbg.data()[i].real(), Umat_dbg.data()[i].imag());
+                }
+                printf("\n");
+            
+                printf("  Vh (first 4): ");
+                for(int i=0; i < std::min((long)4, Vh_dbg.size()); ++i) {
+                    printf("(%.3f,%.3f) ", Vh_dbg.data()[i].real(), Vh_dbg.data()[i].imag());
+                }
+                printf("\n\n");
+            } 
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat(mat.rows(), chi);
             Eigen::Matrix<Cplx, Eigen::Dynamic, 1> kept_svals(chi);
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Vh(chi, mat.cols());
