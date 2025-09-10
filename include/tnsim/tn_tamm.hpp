@@ -1037,33 +1037,27 @@ namespace NWQSim
         {
             int rank = pg.rank().value();
         
-            // --- START: MODIFICATION ---
-            // 1. Get dimensions from the global bond_dims metadata.
+            // 1. Get dimensions from global metadata.
             IdxType Dl = bond_dims[q0];
-            IdxType D_mid = bond_dims[q0 + 1]; // This is the bond being contracted and updated.
+            IdxType D_mid = bond_dims[q0 + 1];
             IdxType Dr = bond_dims[q1 + 1];
-            const IdxType Dp = 2; // Physical dimension is always 2.
+            const IdxType Dp = 2;
         
-            // 2. Create fully LOCAL TiledIndexSpaces for this computation. This is the key fix.
-            //    Using local spaces prevents ambiguity for the local scheduler.
+            // 2. Create fully LOCAL TiledIndexSpaces for the computation.
             tamm::TiledIndexSpace tis_l_local{tamm::IndexSpace{tamm::range(Dl)}};
             tamm::TiledIndexSpace tis_p0_local{tamm::IndexSpace{tamm::range(Dp)}};
             tamm::TiledIndexSpace tis_b_local{tamm::IndexSpace{tamm::range(D_mid)}};
             tamm::TiledIndexSpace tis_p1_local{tamm::IndexSpace{tamm::range(Dp)}};
             tamm::TiledIndexSpace tis_r_local{tamm::IndexSpace{tamm::range(Dr)}};
         
-            // 3. Create LOCAL input tensors using the newly defined local index spaces.
+            // 3. Create local tensors for inputs and the first intermediate (M).
             tamm::Tensor<Cplx> T0_local({tis_l_local, tis_p0_local, tis_b_local});
             tamm::Tensor<Cplx> T1_local({tis_b_local, tis_p1_local, tis_r_local});
-            // --- END: MODIFICATION ---
+            tamm::Tensor<Cplx> M_local({tis_l_local, tis_p0_local, tis_p1_local, tis_r_local});
+            T0_local.set_dense(); T1_local.set_dense(); M_local.set_dense();
+            sch_local_.allocate(T0_local, T1_local, M_local).execute(exec_hw);
         
-            T0_local.set_dense(); T1_local.set_dense();
-            sch_local_.allocate(T0_local, T1_local).execute(exec_hw);
-        
-            auto start_get = std::chrono::high_resolution_clock::now();
-        
-            // 4. GET data from the global mps_tensors into local buffers, then PUT to local tensors.
-            // This part remains the same.
+            // 4. GET data from global tensors into local host buffers.
             std::vector<Cplx> t0_buf(T0_local.size());
             mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
             T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
@@ -1072,51 +1066,55 @@ namespace NWQSim
             mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
             T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
         
-            auto end_get = std::chrono::high_resolution_clock::now();
-            total_data_movement_time += (end_get - start_get);
-        
-            // --- START: MODIFICATION ---
-            // 5. Define intermediate and result tensors using the LOCAL index spaces.
-            tamm::Tensor<Cplx> M_local({tis_l_local, tis_p0_local, tis_p1_local, tis_r_local});
-            tamm::Tensor<Cplx> G4_local({tis_p0_local, tis_p1_local, tis_p0_local, tis_p1_local});
-            tamm::Tensor<Cplx> M2_local({tis_l_local, tis_p0_local, tis_p1_local, tis_r_local});
-            // --- END: MODIFICATION ---
-        
-            M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
-            sch_local_.allocate(M_local, G4_local, M2_local).execute(exec_hw);
-        
-            auto start_contraction = std::chrono::high_resolution_clock::now();
-        
-            // Perform the first contraction to merge the two MPS tensors.
+            // 5. Perform the first contraction to merge T0 and T1 into M. This one works correctly.
             sch_local_(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
         
-            // Populate the 4x4 gate tensor.
-            std::vector<Cplx> g4_buf(G4_local.size());
-            size_t c = 0;
-            for (int p0p = 0; p0p < Dp; ++p0p) {
-                for (int p1p = 0; p1p < Dp; ++p1p) {
-                    for (int p0_in = 0; p0_in < Dp; ++p0_in) {
-                        for (int p1_in = 0; p1_in < Dp; ++p1_in, ++c) {
-                            int row = p0p * Dp + p1p;
-                            int col = p0_in * Dp + p1_in;
-                            g4_buf[c] = U4[row * (Dp*Dp) + col];
+            // --- START: MANUAL CONTRACTION FIX ---
+            // 6. Get the merged tensor M and the gate U4 into host buffers.
+            std::vector<Cplx> M_hostbuf(M_local.size());
+            M_local.get(*(M_local.loop_nest().begin()), M_hostbuf);
+        
+            // 7. Manually compute the second contraction: M2 = G4 * M.
+            // This bypasses the faulty local scheduler behavior.
+            std::vector<Cplx> M2_hostbuf(M_local.size(), {0.0, 0.0});
+            for(size_t l = 0; l < Dl; ++l) {
+                for(size_t r = 0; r < Dr; ++r) {
+                    // For each (l,r) pair, perform a 4x4 mat-vec product.
+                    // The "vector" is the slice M(l,:,:,r)
+                    // The "matrix" is U4
+                    for(int p_out = 0; p_out < 4; ++p_out) { // p_out = p0p * 2 + p1p
+                        Cplx val = {0.0, 0.0};
+                        for(int p_in = 0; p_in < 4; ++p_in) { // p_in = p0 * 2 + p1
+                            // Index for U4 is straightforward
+                            const Cplx& gate_val = U4[p_out * 4 + p_in];
+        
+                            // Index for M_hostbuf and M2_hostbuf is (l, p0, p1, r)
+                            int p0 = p_in / 2;
+                            int p1 = p_in % 2;
+                            size_t m_idx = (l * Dp * Dp * Dr) + (p0 * Dp * Dr) + (p1 * Dr) + r;
+        
+                            val += gate_val * M_hostbuf[m_idx];
                         }
+                        int p0p = p_out / 2;
+                        int p1p = p_out % 2;
+                        size_t m2_idx = (l * Dp * Dp * Dr) + (p0p * Dp * Dr) + (p1p * Dr) + r;
+                        M2_hostbuf[m2_idx] = val;
                     }
                 }
             }
-            G4_local.put(*(G4_local.loop_nest().begin()), g4_buf);
         
-            // This is the contraction that was previously failing. It should now work correctly.
-            sch_local_(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
+            // 8. Create the final local tensor M2_local and put the manually computed data into it.
+            tamm::Tensor<Cplx> M2_local({tis_l_local, tis_p0_local, tis_p1_local, tis_r_local});
+            M2_local.set_dense();
+            sch_local_.allocate(M2_local).execute(exec_hw);
+            M2_local.put(*(M2_local.loop_nest().begin()), M2_hostbuf);
+            // --- END: MANUAL CONTRACTION FIX ---
         
-            auto end_contraction = std::chrono::high_resolution_clock::now();
-            total_contraction_time += (end_contraction - start_contraction);
-        
-            // Perform SVD on the now-correct local M2_local tensor.
+            // 9. Perform SVD on the now-correct local M2_local tensor.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
         
-            // Package the results for collective update.
+            // 10. Package the results for the collective update.
             LocalGateResult result;
             result.is_valid = true;
             result.q0 = q0;
@@ -1126,8 +1124,8 @@ namespace NWQSim
             result.new_T1_data = std::move(Tj_new_data);
             result.original_rank = rank;
         
-            // Clean up all the temporary local tensors.
-            sch_local_.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
+            // 11. Clean up all temporary local tensors.
+            sch_local_.deallocate(T0_local, T1_local, M_local, M2_local).execute(exec_hw);
         
             return result;
         }
