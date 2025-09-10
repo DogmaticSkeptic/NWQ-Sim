@@ -260,14 +260,23 @@ namespace NWQSim
 
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
+            if (i_proc == 0) {
+                printf("\n<==================== Starting Simulation Kernel ====================>\n");
+                printf("Total number of fused gates to execute: %zu\n", gates.size());
+            }
             // iterate over fused gates and apply each operation
             for (int i = 0; i < static_cast<int>(gates.size()); ++i)
             {
                 const SVGate &g = gates[i];
         
+                if (i_proc == 0) {
+                    printf("\n------------------ Gate %d / %zu ------------------\n", i + 1, gates.size());
+                }
+
                 // single-qubit gate
                 if (g.op_name == OP::C1)
                 {
+                    if (i_proc == 0) printf("Dispatching C1_GATE on qubit %lld\n", g.qubit);
                     std::array<Cplx, 4> U;
                     for (int idx = 0; idx < 4; ++idx)
                     {
@@ -278,6 +287,7 @@ namespace NWQSim
                 // two-qubit controlled gate
                 else if (g.op_name == OP::C2)
                 {
+                    if (i_proc == 0) printf("Dispatching C2_GATE on control=%lld, target=%lld\n", g.ctrl, g.qubit);
                     std::array<Cplx, 16> U4;
                     for (int idx = 0; idx < 16; ++idx)
                     {
@@ -307,10 +317,19 @@ namespace NWQSim
                     throw std::logic_error("Invalid gate type");
                 }
             }
+            if (i_proc == 0) {
+                printf("\n<==================== Simulation Kernel Finished ====================>\n");
+            }
         }
-
         void C1_GATE(const std::array<Cplx, 4> &U, IdxType site)
         {
+            if (i_proc == 0) {
+                printf("\n<==================== C1_GATE on Qubit %lld ====================>\n", site);
+                printf("Input Gate Matrix (U):\n");
+                printf("  [ (%.3f, %.3f), (%.3f, %.3f) ]\n", U[0].real(), U[0].imag(), U[1].real(), U[1].imag());
+                printf("  [ (%.3f, %.3f), (%.3f, %.3f) ]\n", U[2].real(), U[2].imag(), U[3].real(), U[3].imag());
+            }
+
             // build the 2 by 2 gate tensor G
             tamm::Tensor<Cplx> G({phys_tis[site], phys_tis[site]});
             G.set_dense();
@@ -342,6 +361,11 @@ namespace NWQSim
         
             // apply the gate to the site tensor
             auto &T = mps_tensors[site];
+            if (i_proc == 0) {
+                printf("Applying gate to tensor T_%lld with dimensions: [l=%lld, p=%lld, r=%lld]\n",
+                       site, bond_dims[site], phys_dims[site], bond_dims[site+1]);
+            }
+
             tamm::Tensor<Cplx> Tnew({bond_tis[site], phys_tis[site], bond_tis[site + 1]});
             Tnew.set_dense();
             Tnew.allocate(&ec);
@@ -351,12 +375,19 @@ namespace NWQSim
                 "apply_one_qubit", exec_hw);
             sch.execute(exec_hw);
         
+            if (i_proc == 0) {
+                printf("Tensor contraction complete. The new tensor Tnew_%lld has the same dimensions.\n", site);
+            }
+
             // replace old tensor and free memory
             T.deallocate();
             mps_tensors[site] = std::move(Tnew);
             G.deallocate();
-        }
- 
+
+            if (i_proc == 0) {
+                printf("<================== C1_GATE on Qubit %lld Finished ==================>\n\n", site);
+            }
+        } 
 
         /* dump_state is a helper method to help with debugging
          * the tensor simulation before looking at measurement results.
@@ -463,11 +494,34 @@ namespace NWQSim
          * 3) Apply gate tensor
          * 4) Apply SVD and concatenate bond dimension
          * 5) Reallocate tensors to mps sites*/
+        /* Implementation of local 2 qubit gate
+         * 1) Allocate gate tensor
+         * 2) Merge the local sites
+         * 3) Apply gate tensor
+         * 4) Apply SVD and concatenate bond dimension
+         * 5) Reallocate tensors to mps sites*/
         virtual void C2_GATE_L(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
+            if (i_proc == 0) {
+                printf("\n<==================== C2_GATE_L on Qubits (%lld, %lld) ====================>\n", q0, q1);
+                printf("Input Gate Matrix (U4):\n");
+                for (int i = 0; i < 4; ++i) {
+                    printf("  [ (%.2f,%.2f), (%.2f,%.2f), (%.2f,%.2f), (%.2f,%.2f) ]\n",
+                           U4[i*4+0].real(), U4[i*4+0].imag(), U4[i*4+1].real(), U4[i*4+1].imag(),
+                           U4[i*4+2].real(), U4[i*4+2].imag(), U4[i*4+3].real(), U4[i*4+3].imag());
+                }
+            }
+
             // merge tensors at sites q0 and q1
             IdxType Dl = bond_dims[q0];
             IdxType Dr = bond_dims[q1 + 1];
+
+            if (i_proc == 0) {
+                printf("\nStep 1: Merging T_%lld and T_%lld\n", q0, q1);
+                printf("  - T_%lld dimensions: [l=%lld, p0=%lld, b=%lld]\n", q0, bond_dims[q0], phys_dims[q0], bond_dims[q0+1]);
+                printf("  - T_%lld dimensions: [b=%lld, p1=%lld, r=%lld]\n", q1, bond_dims[q1], phys_dims[q1], bond_dims[q1+1]);
+            }
+
             tamm::Tensor<Cplx> M({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M.set_dense();
             M.allocate(&ec);
@@ -478,6 +532,11 @@ namespace NWQSim
                     mps_tensors[q1]("b","p1","r"),
                     "merge_two", exec_hw);
                 sch.execute(exec_hw);
+            }
+
+            if (i_proc == 0) {
+                printf("  - Merge complete. Merged tensor M dimensions: [l=%lld, p0=%lld, p1=%lld, r=%lld]\n",
+                       Dl, phys_dims[q0], phys_dims[q1], Dr);
             }
         
             // build two qubit gate tensor G4
@@ -495,12 +554,12 @@ namespace NWQSim
                 {
                     for (size_t p1p = offs[1]; p1p < offs[1] + dims[1]; ++p1p)
                     {
-                        for (size_t p0 = offs[2]; p0 < offs[2] + dims[2]; ++p0)
+                        for (size_t p0_in = offs[2]; p0_in < offs[2] + dims[2]; ++p0_in)
                         {
-                            for (size_t p1 = offs[3]; p1 < offs[3] + dims[3]; ++p1, ++c)
+                            for (size_t p1_in = offs[3]; p1_in < offs[3] + dims[3]; ++p1_in, ++c)
                             {
                                 int row = int(p0p * 2 + p1p);
-                                int col = int(p0 * 2 + p1);
+                                int col = int(p0_in * 2 + p1_in);
                                 hostbuf[c] = U4[row * 4 + col];
                             }
                         }
@@ -509,6 +568,9 @@ namespace NWQSim
                 G4.put(blockid, hostbuf);
             }
         
+            if (i_proc == 0) {
+                printf("\nStep 2: Applying gate G4 to merged tensor M\n");
+            }
             // apply gate to merged tensor
             tamm::Tensor<Cplx> M2({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M2.set_dense();
@@ -520,12 +582,19 @@ namespace NWQSim
                      "apply_two", exec_hw);
                 sch2.execute(exec_hw);
             }
+            if (i_proc == 0) {
+                printf("  - Gate application complete. Resulting tensor M2 has same dimensions as M.\n");
+            }
             M.deallocate();
             G4.deallocate();
         
             // form matrix for singular value decomposition
             Eigen::Index rows = Dl * 2;
             Eigen::Index cols = 2 * Dr;
+            if (i_proc == 0) {
+                printf("\nStep 3: Performing SVD\n");
+                printf("  - Reshaping M2 into a matrix of size %ld x %ld for SVD.\n", rows, cols);
+            }
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> mat(rows, cols);
             for (const auto &blockid : M2.loop_nest())
             {
@@ -537,13 +606,13 @@ namespace NWQSim
                 size_t c = 0;
                 for (size_t l = offs[0]; l < offs[0] + dims[0]; ++l)
                 {
-                    for (size_t p0 = offs[1]; p0 < offs[1] + dims[1]; ++p0)
+                    for (size_t p0_in = offs[1]; p0_in < offs[1] + dims[1]; ++p0_in)
                     {
-                        for (size_t p1 = offs[2]; p1 < offs[2] + dims[2]; ++p1)
+                        for (size_t p1_in = offs[2]; p1_in < offs[2] + dims[2]; ++p1_in)
                         {
                             for (size_t r = offs[3]; r < offs[3] + dims[3]; ++r, ++c)
                             {
-                                mat(l * 2 + p0, p1 * Dr + r) = hostbuf[c];
+                                mat(l * 2 + p0_in, p1_in * Dr + r) = hostbuf[c];
                             }
                         }
                     }
@@ -554,6 +623,9 @@ namespace NWQSim
             Eigen::BDCSVD<decltype(mat)> svd(mat,
                 Eigen::ComputeThinU | Eigen::ComputeThinV);
             auto svals = svd.singularValues();
+            if (i_proc == 0) {
+                printf("  - SVD computation finished. Found %ld singular values.\n", svals.size());
+            }
             
             std::vector<IdxType> keep;
             keep.reserve(svals.size());
@@ -566,6 +638,12 @@ namespace NWQSim
             }
             
             IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
+            if (i_proc == 0) {
+                printf("  - Truncation details:\n");
+                printf("    - sv_cutoff = %.1e, max_bond_dim = %lld\n", sv_cutoff, max_bond_dim);
+                printf("    - Singular values kept after cutoff: %zu\n", keep.size());
+                printf("    - Final new bond dimension (chi): %lld\n", chi);
+            }
             
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat(mat.rows(), chi);
             Eigen::Matrix<Cplx, Eigen::Dynamic, 1> kept_svals(chi);
@@ -586,6 +664,10 @@ namespace NWQSim
                 tamm::IndexSpace is_new{tamm::range(chi)};
                 bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new, block_size);
             }
+
+            if (i_proc == 0) {
+                printf("\nStep 4: Reconstructing new tensors\n");
+            }
         
             // build new left tensor Ti_new
             tamm::Tensor<Cplx> Ti_new({
@@ -602,15 +684,19 @@ namespace NWQSim
                 size_t c = 0;
                 for (size_t l = offs[0]; l < offs[0] + dims[0]; ++l)
                 {
-                    for (size_t p0 = offs[1]; p0 < offs[1] + dims[1]; ++p0)
+                    for (size_t p0_in = offs[1]; p0_in < offs[1] + dims[1]; ++p0_in)
                     {
                         for (size_t b = offs[2]; b < offs[2] + dims[2]; ++b, ++c)
                         {
-                            hostbuf[c] = Umat(l * 2 + p0, b);
+                            hostbuf[c] = Umat(l * 2 + p0_in, b);
                         }
                     }
                 }
                 Ti_new.put(blockid, hostbuf);
+            }
+            if (i_proc == 0) {
+                printf("  - New left tensor Tnew_%lld created with dimensions: [l=%lld, p0=%lld, b=%lld]\n",
+                       q0, bond_dims[q0], phys_dims[q0], chi);
             }
         
             // build new right tensor Tj_new
@@ -629,15 +715,19 @@ namespace NWQSim
                 size_t c = 0;
                 for (size_t b = offs[0]; b < offs[0] + dims[0]; ++b)
                 {
-                    for (size_t p1 = offs[1]; p1 < offs[1] + dims[1]; ++p1)
+                    for (size_t p1_in = offs[1]; p1_in < offs[1] + dims[1]; ++p1_in)
                     {
                         for (size_t r = offs[2]; r < offs[2] + dims[2]; ++r, ++c)
                         {
-                            hostbuf[c] = SV(b, p1 * Dr + r);
+                            hostbuf[c] = SV(b, p1_in * Dr + r);
                         }
                     }
                 }
                 Tj_new.put(blockid, hostbuf);
+            }
+            if (i_proc == 0) {
+                printf("  - New right tensor Tnew_%lld created with dimensions: [b=%lld, p1=%lld, r=%lld]\n",
+                       q1, chi, phys_dims[q1], Dr);
             }
         
             // replace old tensors and free memory
@@ -646,8 +736,12 @@ namespace NWQSim
             mps_tensors[q0] = std::move(Ti_new);
             mps_tensors[q1] = std::move(Tj_new);
             M2.deallocate();
-        }
 
+            if (i_proc == 0) {
+                printf("  - Old tensors replaced. State update is complete.\n");
+                printf("<================== C2_GATE_L on Qubits (%lld, %lld) Finished ==================>\n\n", q0, q1);
+            }
+        }
 
         // Note: This is not currently working, the itensor version works but this proved a little tricky in TAMM
         virtual void C2_GATE_NL(
@@ -951,10 +1045,16 @@ namespace NWQSim
             // choose local or non-local implementation based on qubit adjacency
             if (std::abs(q0 - q1) == 1)
             {
-                C2_GATE_L(U4, q0, q1);
+                if (i_proc == 0) {
+                    printf("  -> Qubits (%lld, %lld) are adjacent. Calling C2_GATE_L (Local).\n", q0, q1);
+                }
+                C2_GATE_L(U4, std::min(q0, q1), std::max(q0, q1));
             }
             else
             {
+                if (i_proc == 0) {
+                     printf("  -> Qubits (%lld, %lld) are non-adjacent. Calling C2_GATE_NL_SWAP (Non-Local).\n", q0, q1);
+                }
                 C2_GATE_NL_SWAP(U4, q0, q1);
             }
         }
