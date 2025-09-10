@@ -1094,6 +1094,15 @@ namespace NWQSim
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
 
+            std::vector<Cplx> M2_local_hostbuf(M2_local.size());
+            M2_local.get(*(M2_local.loop_nest().begin()), M2_local_hostbuf);
+            std::cout << "[PARALLEL DIAG RANK " << rank << "] M2_local tensor for qubits (" << q0 << ", " << q1 
+                      << ") has " << M2_local_hostbuf.size() << " elements:" << std::endl;
+            for(size_t i = 0; i < M2_local_hostbuf.size(); ++i) {
+                std::cout << "(" << M2_local_hostbuf[i].real() << "," << M2_local_hostbuf[i].imag() << ") ";
+            }
+            std::cout << std::endl << std::endl;
+
             // 5. Perform SVD on the local M2_local tensor.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
