@@ -151,6 +151,41 @@ namespace NWQSim
             }
         }
 
+        void print_mps_tensor(IdxType site)
+        {
+            if (i_proc != 0) return;
+
+            // Get the tensor and its dimensions
+            auto& T = mps_tensors[site];
+            IdxType Dl = bond_dims[site];
+            IdxType Dp = phys_dims[site];
+            IdxType Dr = bond_dims[site + 1];
+
+            // Get the tensor data from the device/host into a std::vector
+            std::vector<Cplx> hostbuf(T.size());
+            T.get(*(T.loop_nest().begin()), hostbuf);
+
+            // Print the formatted output
+            printf("--- Tensor T_%lld ---\n", site);
+            printf("Dimensions: [l=%lld, p=%lld, r=%lld]\n", Dl, Dp, Dr);
+            
+            size_t idx = 0;
+            for (IdxType l = 0; l < Dl; ++l) {
+                printf("  l=%lld:\n", l);
+                for (IdxType p = 0; p < Dp; ++p) {
+                    printf("    p=%lld: [ ", p);
+                    for (IdxType r = 0; r < Dr; ++r) {
+                        // To avoid printing tiny numbers from floating point inaccuracies
+                        double real_part = std::abs(hostbuf[idx].real()) < 1e-10 ? 0.0 : hostbuf[idx].real();
+                        double imag_part = std::abs(hostbuf[idx].imag()) < 1e-10 ? 0.0 : hostbuf[idx].imag();
+                        printf("(%.3f, %.3f) ", real_part, imag_part);
+                        idx++;
+                    }
+                    printf("]\n");
+                }
+            }
+        }
+
         ~TN_TAMM() noexcept override 
         {
             SAFE_FREE_HOST(results);
@@ -263,7 +298,14 @@ namespace NWQSim
             if (i_proc == 0) {
                 printf("\n<==================== Starting Simulation Kernel ====================>\n");
                 printf("Total number of fused gates to execute: %zu\n", gates.size());
+                
+                printf("\n===== Initial MPS State =====\n");
+                for (IdxType q_idx = 0; q_idx < n_qubits; ++q_idx) {
+                    print_mps_tensor(q_idx);
+                }
+                printf("=============================\n");
             }
+
             // iterate over fused gates and apply each operation
             for (int i = 0; i < static_cast<int>(gates.size()); ++i)
             {
@@ -316,11 +358,21 @@ namespace NWQSim
                     std::cout << "Unrecognized gate type" << std::endl;
                     throw std::logic_error("Invalid gate type");
                 }
+
+                // *** NEW: Print the entire MPS state after the gate has been applied ***
+                if (i_proc == 0) {
+                    printf("\n===== MPS State after Gate %d =====\n", i + 1);
+                    for (IdxType q_idx = 0; q_idx < n_qubits; ++q_idx) {
+                        print_mps_tensor(q_idx);
+                    }
+                    printf("===================================\n");
+                }
             }
             if (i_proc == 0) {
                 printf("\n<==================== Simulation Kernel Finished ====================>\n");
             }
         }
+
         void C1_GATE(const std::array<Cplx, 4> &U, IdxType site)
         {
             if (i_proc == 0) {
