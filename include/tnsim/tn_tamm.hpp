@@ -1229,6 +1229,7 @@ namespace NWQSim
         //}
 
 
+        // Replace the existing local_svd_and_reconstruct_data function with this one
         IdxType local_svd_and_reconstruct_data(
             tamm::Tensor<Cplx>& M2_local,
             std::vector<Cplx>& Ti_new_data,
@@ -1236,7 +1237,7 @@ namespace NWQSim
             IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
-            //std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
+            std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data: Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
         
             const IdxType phys_dim = 2;
             IdxType Dl = M2_local.tiled_index_spaces()[0].index_space().num_indices();
@@ -1245,10 +1246,15 @@ namespace NWQSim
             int m = Dl * phys_dim;
             int n = phys_dim * Dr;
         
-            // Reshape the row-major TAMM tensor data into a column-major matrix for cuSOLVER.
             std::vector<Cplx> M2_col_major(m * n);
             std::vector<Cplx> M2_hostbuf(M2_local.size());
             M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
+        
+            // --- Pre-SVD Diagnostics ---
+            double pre_svd_norm_sq = 0.0;
+            for(const auto& val : M2_hostbuf) pre_svd_norm_sq += std::norm(val);
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Pre-SVD matrix (reshaped from M2) norm = " 
+                      << std::sqrt(pre_svd_norm_sq) << std::endl;
         
             size_t c = 0;
             for (size_t l = 0; l < Dl; ++l)
@@ -1260,23 +1266,27 @@ namespace NWQSim
                 size_t col = p1 * Dr + r;
                 M2_col_major[row + col * m] = M2_hostbuf[c];
             }
-            //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Reshape complete." << std::endl;
-        
-            // --- Start Timing SVD ---
+            
             auto start_svd = std::chrono::high_resolution_clock::now();
-
-            // Perform the SVD on the GPU.
+        
             std::vector<double> S;
             std::vector<Cplx> U_row, VT_row;
             gpu_svd_jacobi(M2_col_major.data(), m, n, S, U_row, VT_row);
-
+        
             auto end_svd = std::chrono::high_resolution_clock::now();
-            // --- End Timing SVD ---
-            
-            // Accumulate the time for this SVD operation
             total_svd_time += (end_svd - start_svd);
-
-            // Truncate based on singular value cutoff and max bond dimension.
+        
+            // --- Post-SVD Diagnostics ---
+            double s_norm_sq = 0.0;
+            for(const auto& val : S) s_norm_sq += val * val;
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Post-SVD. Number of singular values = " << S.size() 
+                      << ". Sum of squares of singular values = " << s_norm_sq << std::endl;
+            std::stringstream ss_s;
+            ss_s << std::fixed << std::setprecision(5);
+            for(size_t i=0; i<std::min((size_t)8, S.size()); ++i) ss_s << S[i] << " ";
+            std::cout << "[RANK " << rank << "]   - Singular values: [ " << ss_s.str() << "...]" << std::endl;
+        
+            // Truncation
             std::vector<IdxType> keep;
             keep.reserve(S.size());
             for (size_t i = 0; i < S.size(); ++i) {
@@ -1285,12 +1295,12 @@ namespace NWQSim
                 }
             }
             IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
-            if (chi == 0) {
-                chi = 1; // Prevent bond dimension from becoming zero.
+            if (chi == 0 && !S.empty()) {
+                chi = 1; 
             }
-            //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
+            std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data: Truncation complete. New bond dimension (chi): " << chi << "." << std::endl;
         
-            // Populate the output vectors with the data for the new tensors.
+            // Reconstruction
             Ti_new_data.resize(Dl * phys_dim * chi);
             c = 0;
             for (size_t l = 0; l < Dl; ++l)
@@ -1309,7 +1319,7 @@ namespace NWQSim
                 Tj_new_data[c] = Cplx(S[keep[b]], 0.0) * VT_row[keep[b] * n + (p1 * Dr + r)];
             }
         
-            //std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data: Exiting." << std::endl;
+            std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data: Exiting." << std::endl;
             return chi;
         }
 
