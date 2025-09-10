@@ -1068,28 +1068,32 @@ namespace NWQSim
         
             sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
         
-            // *** REVISED: Explicitly fill the G4_local tensor ***
-            // The previous tamm::update_tensor was likely only filling the first element.
-            // This manual approach is more robust for local tensors.
-            auto g4_span = G4_local.access_local_buf();
+            // *** CORRECTED: Populate G4_local using a host buffer and a standard put operation. ***
+            // This is the guaranteed-to-work method, mirroring your serial code's logic.
+            std::vector<Cplx> g4_buf(G4_local.size());
+            // The indices p0p, p1p, p0, p1 correspond to the tensor's TiledIndexSpace definition.
+            // The data is arranged in row-major order matching this loop structure.
             size_t c = 0;
             for (int p0p = 0; p0p < 2; ++p0p) {
                 for (int p1p = 0; p1p < 2; ++p1p) {
-                    for (int p0 = 0; p0 < 2; ++p0) {
-                        for (int p1 = 0; p1 < 2; ++p1, ++c) {
-                            g4_span[c] = U4[(p0p * 2 + p1p) * 4 + (p0 * 2 + p1)];
+                    for (int p0_in = 0; p0_in < 2; ++p0_in) {
+                        for (int p1_in = 0; p1_in < 2; ++p1_in, ++c) {
+                            int row = p0p * 2 + p1p;
+                            int col = p0_in * 2 + p1_in;
+                            g4_buf[c] = U4[row * 4 + col];
                         }
                     }
                 }
             }
-            G4_local.update_local_buf(g4_span);
-            // *** END REVISION ***
+            // Since G4_local is small and local, it has one block. We put the entire buffer into it.
+            G4_local.put(*(G4_local.loop_nest().begin()), g4_buf);
+            // *** END CORRECTION ***
 
             sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
         
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
-        
+
             // 5. Perform SVD on the local M2_local tensor.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
