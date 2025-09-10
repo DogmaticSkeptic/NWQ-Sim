@@ -945,25 +945,18 @@ namespace NWQSim
         }
 
 
-        // Replace the existing C2_GATE_COMPUTE function with this one
+        // Replace the existing C2_GATE_COMPUTE function with this corrected version.
         LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1
-                      << "): Starting local computation." << std::endl;
         
-            // 1. Local execution environment setup
-            tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
-            tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
-            tamm::Scheduler sch_local{ec_local};
-        
-            // 2. Get dimensions
+            // 1. Get dimensions
             const IdxType phys_dim = 2;
             IdxType Dl = bond_dims[q0];
             IdxType Db = bond_dims[q0 + 1];
             IdxType Dr = bond_dims[q1 + 1];
         
-            // 3. Get input tensor data from global state
+            // 2. Get input tensor data from global state into host buffers
             auto start_get = std::chrono::high_resolution_clock::now();
             std::vector<Cplx> t0_buf(Dl * phys_dim * Db);
             mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
@@ -976,45 +969,53 @@ namespace NWQSim
             print_buffer_diag("INPUT ", q0, t0_buf);
             print_buffer_diag("INPUT ", q1, t1_buf);
             
-            // 4. Perform Contraction using EIGEN
+            // 3. Perform Contraction and Gate Application using EIGEN
             auto start_contraction = std::chrono::high_resolution_clock::now();
             
-            // Reshape T0 and T1 into 2D Eigen matrices
-            Eigen::Map<Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
-                T0_mat(t0_buf.data(), Dl * phys_dim, Db);
+            // -- CORRECTED RESHAPE --
+            // Manually construct the 2D Eigen matrices to ensure correct element placement.
+            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> T0_mat(Dl * phys_dim, Db);
+            size_t c0 = 0;
+            for(size_t l=0; l<Dl; ++l) {
+                for(size_t p=0; p<phys_dim; ++p) {
+                    for(size_t b=0; b<Db; ++b, ++c0) {
+                        T0_mat(l*phys_dim + p, b) = t0_buf[c0];
+                    }
+                }
+            }
         
-            Eigen::Map<Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>
-                T1_mat(t1_buf.data(), Db, phys_dim * Dr);
-        
-            // M(l,p0,p1,r) = T0(l,p0,b) * T1(b,p1,r)
+            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> T1_mat(Db, phys_dim * Dr);
+            size_t c1 = 0;
+            for(size_t b=0; b<Db; ++b) {
+                for(size_t p=0; p<phys_dim; ++p) {
+                    for(size_t r=0; r<Dr; ++r, ++c1) {
+                        T1_mat(b, p*Dr + r) = t1_buf[c1];
+                    }
+                }
+            }
+            
+            // M(l*p0, p1*r) = T0 * T1. This contraction is now correct.
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> M_mat = T0_mat * T1_mat;
             
-            // Now M_mat holds the result of the contraction, with shape (Dl*p0) x (p1*Dr)
-            
-            // Apply the 2-qubit gate U4
+            // Apply the 2-qubit gate U4 to the merged tensor M_mat
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> M2_mat(Dl * phys_dim, phys_dim * Dr);
-            Eigen::Map<Eigen::Matrix<Cplx, 4, 4, Eigen::RowMajor>> G_mat(const_cast<Cplx*>(U4.data()));
+            Eigen::Map<const Eigen::Matrix<Cplx, 4, 4, Eigen::RowMajor>> G_mat(const_cast<Cplx*>(U4.data()));
         
-            for(IdxType l=0; l<Dl; ++l) {
-                for(IdxType r=0; r<Dr; ++r) {
-                    // Extract the 2x2 submatrix for this l,r pair
+            for(IdxType l = 0; l < Dl; ++l) {
+                for(IdxType r = 0; r < Dr; ++r) {
                     Eigen::Matrix<Cplx, 2, 2> m_slice;
-                    for(int p0=0; p0<2; ++p0) {
-                        for(int p1=0; p1<2; ++p1) {
-                            m_slice(p0, p1) = M_mat(l*phys_dim + p0, p1*Dr + r);
+                    for(int p0 = 0; p0 < 2; ++p0) {
+                        for(int p1 = 0; p1 < 2; ++p1) {
+                            m_slice(p0, p1) = M_mat(l * phys_dim + p0, p1 * Dr + r);
                         }
                     }
         
-                    // Apply the gate: m' = G * m
-                    // Eigen stores G in column-major, so we need to transpose it
-                    // Reshape m_slice to a 4x1 vector to match G
                     Eigen::Map<Eigen::Matrix<Cplx, 4, 1>> m_vec(m_slice.data());
-                    Eigen::Matrix<Cplx, 4, 1> m_prime_vec = G_mat.transpose() * m_vec;
+                    Eigen::Matrix<Cplx, 4, 1> m_prime_vec = G_mat * m_vec;
         
-                    // Put the result back into the M2 matrix
-                    for(int p0p=0; p0p<2; ++p0p) {
-                        for(int p1p=0; p1p<2; ++p1p) {
-                            M2_mat(l*phys_dim + p0p, p1p*Dr + r) = m_prime_vec(p0p*2 + p1p);
+                    for(int p0p = 0; p0p < 2; ++p0p) {
+                        for(int p1p = 0; p1p < 2; ++p1p) {
+                            M2_mat(l * phys_dim + p0p, p1p * Dr + r) = m_prime_vec(p0p * 2 + p1p);
                         }
                     }
                 }
@@ -1022,13 +1023,16 @@ namespace NWQSim
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
             
-            // Create a temporary TAMM tensor to pass to the SVD function
+            // 4. Create a temporary local TAMM tensor to pass to the SVD function.
+            tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
+            tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
+            tamm::Scheduler sch_local{ec_local};
             tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M2_local.set_dense();
             sch_local.allocate(M2_local).execute(exec_hw);
             M2_local.put(*(M2_local.loop_nest().begin()), {M2_mat.data(), (size_t)M2_mat.size()});
         
-            // 5. Perform SVD on the result
+            // 5. Perform SVD using your trusted Eigen-based function
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
         
@@ -1048,7 +1052,6 @@ namespace NWQSim
             sch_local.deallocate(M2_local).execute(exec_hw);
             self_pg.destroy_coll();
             
-            std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1 << "): Finished." << std::endl;
             return result;
         }
 
