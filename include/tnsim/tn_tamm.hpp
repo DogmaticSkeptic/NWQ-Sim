@@ -455,58 +455,24 @@ namespace NWQSim
             }
         }
 
-        // In the TN_TAMM class
-        static void append_round_robin(const std::vector<SVGate>& layer, std::vector<SVGate>& out)
-        {
-            std::vector<SVGate> singles;
-            std::vector<SVGate> twos;
-            singles.reserve(layer.size());
-            twos.reserve(layer.size());
-            for (const auto& gate : layer)
-            {
-                if (gate.op_name == OP::C1) singles.push_back(gate);
-                else twos.push_back(gate);
+        // Add this helper function inside the TN_TAMM class, maybe near the top.
+        void print_buffer_diag(const std::string& name, IdxType q, const std::vector<Cplx>& buf) {
+            if (buf.empty()) {
+                std::cout << "[RANK " << pg.rank().value() << "] DIAG " << name << " q=" << q << ": EMPTY" << std::endl;
+                return;
             }
+            double norm = 0.0;
+            for(const auto& val : buf) norm += std::norm(val);
             
-            size_t i = 0, j = 0;
-            
-            // Interleave while both lists have elements
-            while (i < singles.size() && j < twos.size())
-            {
-                // Prioritize the longer list to start, for better balance
-                if (singles.size() >= twos.size()) {
-                     out.push_back(singles[i++]);
-                     if (j < twos.size()) out.push_back(twos[j++]);
-                } else {
-                     out.push_back(twos[j++]);
-                     if (i < singles.size()) out.push_back(singles[i++]);
-                }
+            std::stringstream ss;
+            ss << std::fixed << std::setprecision(3);
+            for(size_t i = 0; i < std::min((size_t)4, buf.size()); ++i) {
+                ss << "(" << buf[i].real() << "," << buf[i].imag() << ") ";
             }
         
-            // Append the remainder of whichever list is not yet empty.
-            // Only one of these two loops will execute.
-            while (i < singles.size()) {
-                out.push_back(singles[i++]);
-            }
-            while (j < twos.size()) {
-                out.push_back(twos[j++]);
-            }
-        }        
-
-        // In the TN_TAMM class
-        std::string gate_to_string(const SVGate& g) {
-            std::stringstream ss;
-            if (g.op_name == OP::C1) {
-                ss << "C1(" << g.qubit << ")";
-            } else if (g.op_name == OP::C2) {
-                ss << "C2(" << g.ctrl << "," << g.qubit << ")";
-            } else {
-                ss << "UNKNOWN";
-            }
-            return ss.str();
+            std::cout << "[RANK " << pg.rank().value() << "] DIAG " << name << " q=" << q 
+                      << " | norm=" << norm << " | data=[" << ss.str() << "...]" << std::endl;
         }
-
-
 
     protected:
         IdxType n_qubits;
@@ -533,8 +499,6 @@ namespace NWQSim
         std::chrono::duration<double> total_scheduling_time{0.0};
         std::chrono::duration<double> total_resource_management_time{0.0};
 
-        // In the TN_TAMM class
-        
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
@@ -620,6 +584,11 @@ namespace NWQSim
                     if (layer.empty()) {
                         continue;
                     }
+
+                    if (pg.rank().value() == 0) {
+                        std::cout << "\n<====================== STARTING LAYER " << layer_idx << " ======================>" << std::endl;
+                    }
+
         
                     // Run gates in parallel (this includes C1 and C2 computations)
                     pg.barrier();
@@ -637,6 +606,10 @@ namespace NWQSim
                     
                     // Accumulate synchronization time
                     total_synchronization_time += (end_sync - start_sync);
+
+                    if (pg.rank().value() == 0) {
+                        std::cout << "<====================== FINISHED LAYER " << layer_idx << " ======================>\n" << std::endl;
+                    }
         
                     // if (rank == 0) { // Removed per-layer print to avoid clutter, total will be printed at end
                         //std::cout << "Layer " << layer_idx
@@ -990,12 +963,16 @@ namespace NWQSim
             mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
             T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
 
+            std::cout << "[RANK " << pg.rank().value() << "] C2_COMPUTE(" << q0 << "," << q1 << "): GOT INPUT TENSORS" << std::endl;
+            print_buffer_diag("INPUT ", q0, t0_buf);
+
             double norm_t0 = 0.0;
             for(const auto& val : t0_buf) norm_t0 += std::norm(val);
             std::cout << "[RANK " << pg.rank().value() << "] PARALLEL T0 norm: " << norm_t0 << std::endl;
         
             std::vector<Cplx> t1_buf(T1_local.size());
             mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
+            print_buffer_diag("INPUT ", q1, t1_buf);
             T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
 
             auto end_get = std::chrono::high_resolution_clock::now();
@@ -1031,6 +1008,10 @@ namespace NWQSim
             // 5. Perform SVD on the local M2_local tensor.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
+
+            std::cout << "[RANK " << pg.rank().value() << "] C2_COMPUTE(" << q0 << "," << q1 << "): PRODUCED OUTPUT TENSORS" << std::endl;
+            print_buffer_diag("OUTPUT", q0, Ti_new_data);
+            print_buffer_diag("OUTPUT", q1, Tj_new_data);
             
             // 6. Package the results into the POD struct.
             LocalGateResult result;
