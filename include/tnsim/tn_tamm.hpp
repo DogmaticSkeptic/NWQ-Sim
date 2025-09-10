@@ -1325,7 +1325,7 @@ namespace NWQSim
             
             // 6a. Populate the new left tensor data (from Umat)
             Ti_new_data.resize(Dl * phys_dim * chi);
-            int c = 0;
+            c = 0;
             for (size_t l = 0; l < Dl; ++l) {
                 for (size_t p0 = 0; p0 < phys_dim; ++p0) {
                     for (size_t b = 0; b < chi; ++b, ++c) {
