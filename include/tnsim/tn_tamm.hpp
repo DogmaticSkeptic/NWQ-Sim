@@ -1029,8 +1029,6 @@ namespace NWQSim
         LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
-            // std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1
-            //           << "): Passed pre-computation barrier. Starting local computation." << std::endl;
         
             // 1. Create a truly local execution context for this one-shot computation.
             tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
@@ -1067,50 +1065,36 @@ namespace NWQSim
             auto start_contraction = std::chrono::high_resolution_clock::now();
         
             sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
-        
-            // *** CORRECTED: Populate G4_local using a host buffer and a standard put operation. ***
-            // This is the guaranteed-to-work method, mirroring your serial code's logic.
-            std::vector<Cplx> g4_buf(G4_local.size());
-            // The indices p0p, p1p, p0, p1 correspond to the tensor's TiledIndexSpace definition.
-            // The data is arranged in row-major order matching this loop structure.
-            size_t c = 0;
-            for (int p0p = 0; p0p < 2; ++p0p) {
-                for (int p1p = 0; p1p < 2; ++p1p) {
-                    for (int p0_in = 0; p0_in < 2; ++p0_in) {
-                        for (int p1_in = 0; p1_in < 2; ++p1_in, ++c) {
-                            int row = p0p * 2 + p1p;
-                            int col = p0_in * 2 + p1_in;
-                            g4_buf[c] = U4[row * 4 + col];
+            
+            // *** MODIFIED SECTION: Populate G4_local using update_tensor for robustness. ***
+            auto g4_filler =
+              [&](const IndexVector& blockid_unused, tamm::span<Cplx> buff) {
+                size_t c = 0;
+                for (int p0p = 0; p0p < 2; ++p0p) {
+                    for (int p1p = 0; p1p < 2; ++p1p) {
+                        for (int p0_in = 0; p0_in < 2; ++p0_in) {
+                            for (int p1_in = 0; p1_in < 2; ++p1_in, ++c) {
+                                int row = p0p * 2 + p1p;
+                                int col = p0_in * 2 + p1_in;
+                                buff[c] = U4[row * 4 + col];
+                            }
                         }
                     }
                 }
-            }
-            // Since G4_local is small and local, it has one block. We put the entire buffer into it.
-            G4_local.put(*(G4_local.loop_nest().begin()), g4_buf);
-            // *** END CORRECTION ***
-            //
-            std::cout << "[PARALLEL GATE DIAG RANK " << rank << "] Gate buffer g4_buf for qubits (" 
-                      << q0 << ", " << q1 << ") has " << g4_buf.size() << " elements:" << std::endl;
-            for(size_t i = 0; i < g4_buf.size(); ++i) {
-                std::cout << "(" << g4_buf[i].real() << "," << g4_buf[i].imag() << ") ";
-                if ((i + 1) % 4 == 0) std::cout << std::endl; // For readability
-            }
-            std::cout << std::endl;
-
+            };
+            tamm::update_tensor(G4_local, g4_filler);
+        
+            // *** DIAGNOSTIC: Print the contents of the gate tensor ***
+            print_4_index_tensor(G4_local, "G4_local", q0, q1);
+            
             sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
+        
+            // *** DIAGNOSTIC: Print the contents of the M2 tensor AFTER contraction ***
+            print_4_index_tensor(M2_local, "M2_local", q0, q1);
         
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
-
-            std::vector<Cplx> M2_local_hostbuf(M2_local.size());
-            M2_local.get(*(M2_local.loop_nest().begin()), M2_local_hostbuf);
-            std::cout << "[PARALLEL DIAG RANK " << rank << "] M2_local tensor for qubits (" << q0 << ", " << q1 
-                      << ") has " << M2_local_hostbuf.size() << " elements:" << std::endl;
-            for(size_t i = 0; i < M2_local_hostbuf.size(); ++i) {
-                std::cout << "(" << M2_local_hostbuf[i].real() << "," << M2_local_hostbuf[i].imag() << ") ";
-            }
-            std::cout << std::endl << std::endl;
-
+        
             // 5. Perform SVD on the local M2_local tensor.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
