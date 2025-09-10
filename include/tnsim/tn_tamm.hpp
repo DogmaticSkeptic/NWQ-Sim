@@ -118,7 +118,11 @@ namespace NWQSim
             max_bond_dim(max_bond_dim),
             sv_cutoff(sv_cutoff),
             pg(init_pg()),
-            ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga)
+            ec(pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::ga),
+            pg_local_(tamm::ProcGroup::create_self()),
+            ec_local_(pg_local_, tamm::DistributionKind::dense, 
+                      tamm::MemoryManagerKind::local),
+            sch_local_(ec_local_)                     
         {
             i_proc = pg.rank().value();
             
@@ -558,6 +562,10 @@ namespace NWQSim
         int block_size;
         double sv_cutoff;
         tamm::ExecutionHW exec_hw;
+
+        tamm::ProcGroup pg_local_;
+        tamm::ExecutionContext ec_local_;
+        tamm::Scheduler sch_local_;
 
         tamm::ProcGroup pg;
         tamm::ExecutionContext ec;
@@ -1025,27 +1033,19 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] <-- C1_GATE_local_kernel on qubit " << q_idx << " finished." << std::endl;
         }
 
-        // This function now returns a struct containing the new data and metadata
         LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
-            // std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1
-            //           << "): Passed pre-computation barrier. Starting local computation." << std::endl;
         
-            // 1. Create a truly local execution context for this one-shot computation.
-            tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
-            tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
-            tamm::Scheduler sch_local{ec_local};
-        
-            // 2. Create LOCAL tensors for inputs and intermediates.
+            // 1. Create LOCAL tensors for inputs and intermediates using the MEMBER scheduler.
             tamm::Tensor<Cplx> T0_local({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
             tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
             T0_local.set_dense(); T1_local.set_dense();
-            sch_local.allocate(T0_local, T1_local).execute(exec_hw);
+            sch_local_.allocate(T0_local, T1_local).execute(exec_hw);
         
             auto start_get = std::chrono::high_resolution_clock::now();
         
-            // 3. GET data from the global mps_tensors into local std::vectors, then PUT to local tensors.
+            // 2. GET data from the global mps_tensors into local std::vectors, then PUT to local tensors.
             std::vector<Cplx> t0_buf(T0_local.size());
             mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
             T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
@@ -1057,23 +1057,19 @@ namespace NWQSim
             auto end_get = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_get - start_get);
         
-            // 4. Perform local computations using the local scheduler.
+            // 3. Perform local computations using the MEMBER scheduler.
             tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
             tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
-            sch_local.allocate(M_local, G4_local, M2_local).execute(exec_hw);
+            sch_local_.allocate(M_local, G4_local, M2_local).execute(exec_hw);
         
             auto start_contraction = std::chrono::high_resolution_clock::now();
         
-            sch_local(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
+            sch_local_(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
             
-            // *** MODIFIED SECTION: Populate G4_local using update_tensor for robustness. ***
             auto g4_filler =
-              // CORRECTED LINE: Added "tamm::" namespace qualifier to IndexVector
               [&](const tamm::IndexVector& blockid_unused, tamm::span<Cplx> buff) {
-                // This lambda is called for each block of G4_local (in this case, only one).
-                // The buffer `buff` points directly to the tensor's memory.
                 size_t c = 0;
                 for (int p0p = 0; p0p < 2; ++p0p) {
                     for (int p1p = 0; p1p < 2; ++p1p) {
@@ -1088,24 +1084,17 @@ namespace NWQSim
                 }
             };
             tamm::update_tensor(G4_local, g4_filler);
-            // *** END MODIFIED SECTION ***
         
-            // *** DIAGNOSTIC: Print the contents of the gate tensor ***
-            print_4_index_tensor(G4_local, "G4_local", q0, q1);
+            sch_local_(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
             
-            sch_local(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
-        
-            // *** DIAGNOSTIC: Print the contents of the M2 tensor AFTER contraction ***
-            print_4_index_tensor(M2_local, "M2_local", q0, q1);
-        
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
         
-            // 5. Perform SVD on the local M2_local tensor.
+            // 4. Perform SVD on the local M2_local tensor.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
         
-            // 6. Package the results into the POD struct.
+            // 5. Package the results into the POD struct.
             LocalGateResult result;
             result.is_valid = true;
             result.q0 = q0;
@@ -1115,10 +1104,9 @@ namespace NWQSim
             result.new_T1_data = std::move(Tj_new_data);
             result.original_rank = rank;
         
-            // 7. Clean up all temporary local resources.
-            sch_local.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
-            self_pg.destroy_coll();
-        
+            // 6. Clean up only the temporary TENSORS. The contexts and schedulers persist.
+            sch_local_.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
+            
             return result;
         }
 
