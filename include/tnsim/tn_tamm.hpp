@@ -1029,6 +1029,8 @@ namespace NWQSim
         LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
+            // std::cout << "[RANK " << rank << "] C2_COMPUTE(" << q0 << "," << q1
+            //           << "): Passed pre-computation barrier. Starting local computation." << std::endl;
         
             // 1. Create a truly local execution context for this one-shot computation.
             tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
@@ -1068,7 +1070,10 @@ namespace NWQSim
             
             // *** MODIFIED SECTION: Populate G4_local using update_tensor for robustness. ***
             auto g4_filler =
-              [&](const IndexVector& blockid_unused, tamm::span<Cplx> buff) {
+              // CORRECTED LINE: Added "tamm::" namespace qualifier to IndexVector
+              [&](const tamm::IndexVector& blockid_unused, tamm::span<Cplx> buff) {
+                // This lambda is called for each block of G4_local (in this case, only one).
+                // The buffer `buff` points directly to the tensor's memory.
                 size_t c = 0;
                 for (int p0p = 0; p0p < 2; ++p0p) {
                     for (int p1p = 0; p1p < 2; ++p1p) {
@@ -1083,6 +1088,7 @@ namespace NWQSim
                 }
             };
             tamm::update_tensor(G4_local, g4_filler);
+            // *** END MODIFIED SECTION ***
         
             // *** DIAGNOSTIC: Print the contents of the gate tensor ***
             print_4_index_tensor(G4_local, "G4_local", q0, q1);
