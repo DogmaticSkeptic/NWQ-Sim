@@ -1037,64 +1037,62 @@ namespace NWQSim
         {
             int rank = pg.rank().value();
         
-            // 1. Create LOCAL tensors for inputs and intermediates using the MEMBER scheduler.
-            tamm::Tensor<Cplx> T0_local({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
-            tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
+            // 1. GET data from the global mps_tensors into local buffers first.
+            std::vector<Cplx> t0_buf(mps_tensors[q0].size());
+            mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
+        
+            std::vector<Cplx> t1_buf(mps_tensors[q1].size());
+            mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
+        
+            // 2. Create truly local TiledIndexSpaces that match the shapes of the blocks.
+            // This is the key step to avoid mixing global metadata with a local context.
+            tamm::TiledIndexSpace tis_l_q0{tamm::IndexSpace{tamm::range(bond_dims[q0])}};
+            tamm::TiledIndexSpace tis_p_q0{tamm::IndexSpace{tamm::range(phys_dims[q0])}};
+            tamm::TiledIndexSpace tis_b_q0{tamm::IndexSpace{tamm::range(bond_dims[q0+1])}};
+        
+            tamm::TiledIndexSpace tis_b_q1{tamm::IndexSpace{tamm::range(bond_dims[q1])}};
+            tamm::TiledIndexSpace tis_p_q1{tamm::IndexSpace{tamm::range(phys_dims[q1])}};
+            tamm::TiledIndexSpace tis_r_q1{tamm::IndexSpace{tamm::range(bond_dims[q1+1])}};
+            
+            // 3. Create LOCAL tensors using the local TiledIndexSpaces and put the buffered data in.
+            tamm::Tensor<Cplx> T0_local({tis_l_q0, tis_p_q0, tis_b_q0});
+            tamm::Tensor<Cplx> T1_local({tis_b_q1, tis_p_q1, tis_r_q1});
             T0_local.set_dense(); T1_local.set_dense();
             sch_local_.allocate(T0_local, T1_local).execute(exec_hw);
-        
-            auto start_get = std::chrono::high_resolution_clock::now();
-        
-            // 2. GET data from the global mps_tensors into local std::vectors, then PUT to local tensors.
-            std::vector<Cplx> t0_buf(T0_local.size());
-            mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
+            
             T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
-        
-            std::vector<Cplx> t1_buf(T1_local.size());
-            mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
             T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
-        
-            auto end_get = std::chrono::high_resolution_clock::now();
-            total_data_movement_time += (end_get - start_get);
-        
-            // 3. Perform local computations using the MEMBER scheduler.
-            tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
-            tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
-            tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+            
+            // 4. Perform the local computations, which are now identical to the sequential version's logic.
+            tamm::Tensor<Cplx> M_local({tis_l_q0, tis_p_q0, tis_p_q1, tis_r_q1});
+            tamm::Tensor<Cplx> G4_local({tis_p_q0, tis_p_q1, tis_p_q0, tis_p_q1});
+            tamm::Tensor<Cplx> M2_local({tis_l_q0, tis_p_q0, tis_p_q1, tis_r_q1});
             M_local.set_dense(); G4_local.set_dense(); M2_local.set_dense();
             sch_local_.allocate(M_local, G4_local, M2_local).execute(exec_hw);
-        
-            auto start_contraction = std::chrono::high_resolution_clock::now();
         
             sch_local_(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
             
             auto g4_filler =
               [&](const tamm::IndexVector& blockid_unused, tamm::span<Cplx> buff) {
                 size_t c = 0;
-                for (int p0p = 0; p0p < 2; ++p0p) {
-                    for (int p1p = 0; p1p < 2; ++p1p) {
-                        for (int p0_in = 0; p0_in < 2; ++p0_in) {
-                            for (int p1_in = 0; p1_in < 2; ++p1_in, ++c) {
-                                int row = p0p * 2 + p1p;
-                                int col = p0_in * 2 + p1_in;
-                                buff[c] = U4[row * 4 + col];
-                            }
-                        }
-                    }
+                for (int p0p = 0; p0p < 2; ++p0p)
+                for (int p1p = 0; p1p < 2; ++p1p)
+                for (int p0_in = 0; p0_in < 2; ++p0_in)
+                for (int p1_in = 0; p1_in < 2; ++p1_in, ++c) {
+                    int row = p0p * 2 + p1p;
+                    int col = p0_in * 2 + p1_in;
+                    buff[c] = U4[row * 4 + col];
                 }
             };
             tamm::update_tensor(G4_local, g4_filler);
         
             sch_local_(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
-            
-            auto end_contraction = std::chrono::high_resolution_clock::now();
-            total_contraction_time += (end_contraction - start_contraction);
         
-            // 4. Perform SVD on the local M2_local tensor.
+            // 5. Perform SVD and reconstruct. This part is unchanged.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
         
-            // 5. Package the results into the POD struct.
+            // 6. Package the results.
             LocalGateResult result;
             result.is_valid = true;
             result.q0 = q0;
@@ -1104,7 +1102,7 @@ namespace NWQSim
             result.new_T1_data = std::move(Tj_new_data);
             result.original_rank = rank;
         
-            // 6. Clean up only the temporary TENSORS. The contexts and schedulers persist.
+            // 7. Clean up only the temporary TENSORS.
             sch_local_.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
             
             return result;
