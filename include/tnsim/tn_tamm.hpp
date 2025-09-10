@@ -504,9 +504,6 @@ namespace NWQSim
             int rank = pg.rank().value();
             //if (rank == 0) //std::cout << "==> Entering simulation_kernel." << std::endl;
         
-            // ************************************************************************
-            // STAGE 1: Gate Sorting
-            // ************************************************************************
             std::vector<SVGate> parallel_gates;
             std::vector<SVGate> sequential_gates;
             for (const auto& g : gates) {
@@ -521,14 +518,10 @@ namespace NWQSim
                 }
             }
         
-            // ************************************************************************
-            // STAGE 2: Parallel Execution of Unitary Gates
-            // ************************************************************************
             if (!parallel_gates.empty()) {
                 auto start_scheduling = std::chrono::high_resolution_clock::now();
-                // PASS 1: Decompose non-local gates into sequences of local SWAPs.
                 std::vector<SVGate> flat_gates;
-                flat_gates.reserve(parallel_gates.size() * 2); // Pre-allocate memory
+                flat_gates.reserve(parallel_gates.size() * 2);
         
                 for (const auto& g : parallel_gates) {
                     if (g.op_name == OP::C1) {
@@ -537,31 +530,22 @@ namespace NWQSim
                         int a = g.ctrl;
                         int b = g.qubit;
         
-                        // Based on the new rule, we assume a < b is always true.
-                        // The gate is non-local if the qubits are not adjacent.
                         if (b - a > 1) {
-                            // Decompose C2(a, b) into SWAPs and a local C2 gate.
-                            // 1. Move qubit 'a' forward until it is adjacent to 'b'.
                             for (int k = a; k < b - 1; ++k) {
                                 flat_gates.push_back(make_swap_sv(k, k + 1));
                             }
         
-                            // 2. Apply the C2 gate on the now-adjacent pair (b-1, b).
-                            //    The logical qubit 'a' is now at physical site 'b-1'.
                             flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
         
-                            // 3. Undo the SWAPs in reverse order to restore the original qubit layout.
                             for (int k = b - 2; k >= a; --k) {
                                 flat_gates.push_back(make_swap_sv(k, k + 1));
                             }
                         } else {
-                            // The gate is already local (b - a == 1).
                             flat_gates.push_back(g);
                         }
                     }
                 }
         
-                // PASS 2: Layer the flattened circuit for parallel execution.
                 std::vector<std::vector<SVGate>> layers;
                 layers.reserve(flat_gates.size());
                 std::map<int, int> last_layer_map;
@@ -590,14 +574,9 @@ namespace NWQSim
                     }
 
         
-                    // Run gates in parallel (this includes C1 and C2 computations)
                     pg.barrier();
-                    // auto start_exec = std::chrono::high_resolution_clock::now(); // Moved timing specific to contraction/SVD inside functions
                     auto local_update_results = run_gates_parallel(layer);
-                    // auto end_exec = std::chrono::high_resolution_clock::now();
-                    // double exec_time = std::chrono::duration<double>(end_exec - start_exec).count();
         
-                    // Apply collective updates (includes synchronization)
                     pg.barrier(); // First barrier before applying updates
                     auto start_sync = std::chrono::high_resolution_clock::now();
                     apply_collective_updates(local_update_results);
@@ -618,10 +597,7 @@ namespace NWQSim
                 }
             }
         
-            // ************************************************************************
-            // STAGE 3: Sequential Execution of Non-Unitary Gates (NOT TIMED HERE as per request)
-            // ************************************************************************
-            pg.barrier(); // Ensure all parallel work is finished.
+            pg.barrier();
         
             //if (rank == 0 && !sequential_gates.empty()) {
                 //std::cout << "---------- STARTING SEQUENTIAL GATES ----------" << std::endl;
@@ -721,10 +697,11 @@ namespace NWQSim
             return local_results;
         }
 
-        std::vector<GateUpdateMetadata> allgather_metadata(const std::vector<LocalGateResult>& local_results) 
+        std::vector<GateUpdateMetadata> allgather_metadata(const std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
-            //std::cout << "[RANK " << rank << "] >> Entering allgather_metadata. Processing " << local_results.size() << " local results." << std::endl;
+            std::cout << "[RANK " << rank << "] >> Entering allgather_metadata. Processing "
+                      << local_results.size() << " local results." << std::endl;
         
             // Create metadata from the raw local results
             std::vector<GateUpdateMetadata> local_metadata;
@@ -740,11 +717,23 @@ namespace NWQSim
                     });
                 }
             }
-            //std::cout << "[RANK " << rank << "] allgather_metadata: Created " << local_metadata.size() << " local metadata entries." << std::endl;
         
-            // The rest of the function is a collective communication and remains the same.
+            // --- DIAGNOSTIC: Print local metadata before communication ---
+            std::cout << "[RANK " << rank << "] allgather_metadata: Created " << local_metadata.size()
+                      << " local metadata entries to share." << std::endl;
+            for (size_t i = 0; i < local_metadata.size(); ++i) {
+                const auto& m = local_metadata[i];
+                std::cout << "[RANK " << rank << "]   - Local Meta [" << i << "]: q0=" << m.q0
+                          << ", q1=" << m.q1 << ", new_bond_dim=" << m.new_bond_dim
+                          << ", owner=" << m.original_rank << std::endl;
+            }
+        
             int local_size_bytes = local_metadata.size() * sizeof(GateUpdateMetadata);
             std::vector<int> all_sizes_bytes(pg.size().value());
+        
+            // --- DIAGNOSTIC: Print parameters for the first collective (Allgather) ---
+            std::cout << "[RANK " << rank << "] allgather_metadata: Preparing for pg.allgather. My local_size_bytes = "
+                      << local_size_bytes << std::endl;
         
             pg.allgather(&local_size_bytes, 1, all_sizes_bytes.data(), 1);
         
@@ -756,7 +745,16 @@ namespace NWQSim
                 }
                 total_size_bytes += all_sizes_bytes[i];
             }
-            
+        
+            // --- DIAGNOSTIC: Print parameters for the second collective (Allgatherv) ---
+            std::stringstream ss_sizes, ss_displs;
+            for(int s : all_sizes_bytes) ss_sizes << s << " ";
+            for(int d : displacements_bytes) ss_displs << d << " ";
+            std::cout << "[RANK " << rank << "] allgather_metadata: Preparing for MPI_Allgatherv."
+                      << "\n[RANK " << rank << "]   - Total size (bytes): " << total_size_bytes
+                      << "\n[RANK " << rank << "]   - All sizes (bytes):  [ " << ss_sizes.str() << "]"
+                      << "\n[RANK " << rank << "]   - Displacements (bytes): [ " << ss_displs.str() << "]" << std::endl;
+        
             std::vector<GateUpdateMetadata> all_metadata;
             if (total_size_bytes > 0) {
                 all_metadata.resize(total_size_bytes / sizeof(GateUpdateMetadata));
@@ -768,84 +766,95 @@ namespace NWQSim
                                displacements_bytes.data(),
                                MPI_BYTE,
                                pg.comm());
-            } //else {
-                 //std::cout << "[RANK " << rank << "] allgather_metadata: No metadata to gather." << std::endl;
-            //}
+            } else {
+                 std::cout << "[RANK " << rank << "] allgather_metadata: No metadata to gather across all ranks." << std::endl;
+            }
         
-            //std::cout << "[RANK " << rank << "] << Exiting allgather_metadata. Total metadata entries gathered: " << all_metadata.size() << std::endl;
+            // --- DIAGNOSTIC: Print the combined global metadata received by this rank ---
+            std::cout << "[RANK " << rank << "] allgather_metadata: MPI_Allgatherv complete. Received "
+                      << all_metadata.size() << " total metadata entries." << std::endl;
+            for (size_t i = 0; i < all_metadata.size(); ++i) {
+                const auto& m = all_metadata[i];
+                std::cout << "[RANK " << rank << "]   - Global Meta [" << i << "]: q0=" << m.q0
+                          << ", q1=" << m.q1 << ", new_bond_dim=" << m.new_bond_dim
+                          << ", owner=" << m.original_rank << std::endl;
+            }
+        
+        
+            std::cout << "[RANK " << rank << "] << Exiting allgather_metadata." << std::endl;
             return all_metadata;
         }
-
-        // In the TN_TAMM class
+        
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
-            //std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with " << local_results.size() << " local results." << std::endl;
+            std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with "
+                      << local_results.size() << " local results." << std::endl;
         
             auto start_gather = std::chrono::high_resolution_clock::now();
             auto all_metadata = allgather_metadata(local_results);
             auto end_gather = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_gather - start_gather);
-            
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: " << all_metadata.size() << std::endl;
+        
+            std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: "
+                      << all_metadata.size() << std::endl;
         
             tamm::Scheduler sch_global{ec};
-            
+        
             // --- PHASE 1: Deallocate old tensors and update bond dimension metadata ---
-            // A set to avoid duplicate deallocations if a qubit is touched multiple times (e.g., in a SWAP)
-            std::set<IdxType> deallocated_sites; 
+            std::cout << "[RANK " << rank << "] --- apply_collective_updates: PHASE 1 [Deallocation Planning] ---" << std::endl;
+            std::set<IdxType> deallocated_sites;
             for (const auto& meta : all_metadata)
             {
                 if (!meta.is_valid) continue;
-                
+        
                 if (deallocated_sites.find(meta.q0) == deallocated_sites.end()) {
+                    std::cout << "[RANK " << rank << "]   - Queuing deallocation for site " << meta.q0 << std::endl;
                     sch_global.deallocate(mps_tensors[meta.q0]);
                     deallocated_sites.insert(meta.q0);
                 }
                 if (deallocated_sites.find(meta.q1) == deallocated_sites.end()) {
+                    std::cout << "[RANK " << rank << "]   - Queuing deallocation for site " << meta.q1 << std::endl;
                     sch_global.deallocate(mps_tensors[meta.q1]);
                     deallocated_sites.insert(meta.q1);
                 }
         
-                // Update the bond dimension state for the next layer
+                std::cout << "[RANK " << rank << "]   - Updating bond dimension for link " << meta.q0+1
+                          << " to " << meta.new_bond_dim << std::endl;
                 bond_dims[meta.q0 + 1] = meta.new_bond_dim;
                 tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
                 bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
             }
         
             // --- PHASE 2: Allocate new tensors with the now-consistent dimensions ---
-            std::vector<tamm::Tensor<Cplx>> new_tensors;
-            new_tensors.reserve(deallocated_sites.size());
-        
-            // Use a map to create only one new tensor per site.
+            std::cout << "[RANK " << rank << "] --- apply_collective_updates: PHASE 2 [Allocation Planning] ---" << std::endl;
             std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
-        
             for(const auto& site : deallocated_sites) {
                 site_to_new_tensor.emplace(
                     site,
                     tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]}
                 );
                 site_to_new_tensor.at(site).set_dense();
+                std::cout << "[RANK " << rank << "]   - Queuing allocation for new tensor at site " << site << std::endl;
                 sch_global.allocate(site_to_new_tensor.at(site));
             }
         
-            // Execute all deallocations and allocations collectively
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Executing deallocations and allocations..." << std::endl;
+            std::cout << "[RANK " << rank << "] apply_collective_updates: Executing collective deallocations and allocations..." << std::endl;
             auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             sch_global.execute(exec_hw);
             auto end_res_mgmt = std::chrono::high_resolution_clock::now();
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
-        
-            //std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
+            std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
         
             // --- PHASE 3: Transfer data from compute ranks to new tensors ---
-            pg.barrier(); // Ensure allocations are visible everywhere before puts.
+            std::cout << "[RANK " << rank << "] --- apply_collective_updates: PHASE 3 [Data Transfer] ---" << std::endl;
+            std::cout << "[RANK " << rank << "]   - BARRIER before data puts." << std::endl;
+            pg.barrier();
         
             int local_result_idx = 0;
             for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
-                
-                // The rank that computed the result now puts the data into the new global tensors
+        
                 if (rank == meta.original_rank) {
                     auto& result_data = local_results[local_result_idx++];
                     assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
@@ -853,26 +862,34 @@ namespace NWQSim
                     auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
                     auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
         
-                    //std::cout << "[RANK " << rank << "] apply_collective_updates: Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
+                    std::cout << "[RANK " << rank << "]   - I AM THE OWNER (" << meta.original_rank
+                              << "). Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
+                    
+                    // --- DIAGNOSTIC: Print the data being transferred ---
+                    print_buffer_diag("PUTTING", meta.q0, result_data.new_T0_data);
+                    print_buffer_diag("PUTTING", meta.q1, result_data.new_T1_data);
+        
                     tamm::span<Cplx> t0_span{result_data.new_T0_data};
                     tamm::span<Cplx> t1_span{result_data.new_T1_data};
-                    
-                    // Perform the put. This is a one-sided, blocking communication.
-                    // Note: This 'put' is timed inside the compute kernels in this design.
-                    // If it were a non-blocking put, we would time it here.
+        
                     new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), t0_span);
                     new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), t1_span);
+                    
+                    std::cout << "[RANK " << rank << "]   - Put issued for (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
                 }
             }
-            
-            pg.barrier(); // Ensure all puts are complete.
+        
+            std::cout << "[RANK " << rank << "]   - BARRIER after data puts." << std::endl;
+            pg.barrier();
         
             // --- PHASE 4: Update the main MPS state with the new tensors ---
+            std::cout << "[RANK " << rank << "] --- apply_collective_updates: PHASE 4 [State Update] ---" << std::endl;
             for(auto const& [site, new_tensor] : site_to_new_tensor) {
+                std::cout << "[RANK " << rank << "]   - Updating mps_tensors[" << site << "] with new tensor handle." << std::endl;
                 mps_tensors[site] = new_tensor;
             }
         
-            //std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
+            std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
 
         // This function is now a "local kernel". It will be called via RPC
