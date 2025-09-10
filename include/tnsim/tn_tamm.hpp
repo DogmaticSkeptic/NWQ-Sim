@@ -474,6 +474,48 @@ namespace NWQSim
             std::cout << "[RANK " << pg.rank().value() << "] DIAG " << name << " q=" << q_idx 
                       << " | norm=" << std::sqrt(norm_sq) << " | data=[" << ss.str() << "...]" << std::endl;
         }
+
+        void print_mps_tensor(IdxType site)
+        {
+            // Only rank 0 is responsible for printing to avoid console spam
+            if (pg.rank().value() != 0) {
+                return;
+            }
+
+            // Get the tensor and its dimensions
+            auto& T = mps_tensors[site];
+            IdxType Dl = bond_dims[site];
+            IdxType Dp = phys_dims[site];
+            IdxType Dr = bond_dims[site + 1];
+
+            // On rank 0, create a host buffer and use T.get() to pull the data
+            // from its distributed location into this local buffer.
+            std::vector<Cplx> hostbuf(T.size());
+            T.get(*(T.loop_nest().begin()), hostbuf);
+
+            // Print the formatted output, identical to the serial version
+            printf("--- Tensor T_%lld ---\n", site);
+            printf("Dimensions: [l=%lld, p=%lld, r=%lld]\n", Dl, Dp, Dr);
+            
+            size_t idx = 0;
+            for (IdxType l = 0; l < Dl; ++l) {
+                printf("  l=%lld:\n", l);
+                for (IdxType p = 0; p < Dp; ++p) {
+                    printf("    p=%lld: [ ", p);
+                    for (IdxType r = 0; r < Dr; ++r) {
+                        // To avoid printing tiny numbers from floating point inaccuracies
+                        double real_part = std::abs(hostbuf[idx].real()) < 1e-10 ? 0.0 : hostbuf[idx].real();
+                        double imag_part = std::abs(hostbuf[idx].imag()) < 1e-10 ? 0.0 : hostbuf[idx].imag();
+                        printf("(%.3f, %.3f) ", real_part, imag_part);
+                        idx++;
+                    }
+                    printf("]\n");
+                }
+            }
+        }
+
+
+
     protected:
         IdxType n_qubits;
         IdxType* results = NULL;
@@ -502,7 +544,6 @@ namespace NWQSim
         virtual void simulation_kernel(const std::vector<SVGate> &gates)
         {
             int rank = pg.rank().value();
-            //if (rank == 0) //std::cout << "==> Entering simulation_kernel." << std::endl;
         
             std::vector<SVGate> parallel_gates;
             std::vector<SVGate> sequential_gates;
@@ -511,13 +552,21 @@ namespace NWQSim
                     parallel_gates.push_back(g);
                 } else if (g.op_name == OP::M || g.op_name == OP::MA || g.op_name == OP::RESET) {
                     sequential_gates.push_back(g);
-                //} else {
-                    // if (rank == 0) {
-                        //std::cout << "Warning: Unrecognized gate type encountered and ignored." << std::endl;
-                    //}
                 }
             }
         
+            // === NEW: Print Initial State ===
+            pg.barrier();
+            if (rank == 0) {
+                std::cout << "\n<==================== Starting Simulation Kernel ====================>" << std::endl;
+                std::cout << "===== Initial MPS State =====" << std::endl;
+                for (IdxType q_idx = 0; q_idx < n_qubits; ++q_idx) {
+                    print_mps_tensor(q_idx);
+                }
+                std::cout << "=============================" << std::endl;
+            }
+            // =============================
+
             if (!parallel_gates.empty()) {
                 auto start_scheduling = std::chrono::high_resolution_clock::now();
                 std::vector<SVGate> flat_gates;
@@ -530,14 +579,14 @@ namespace NWQSim
                         int a = g.ctrl;
                         int b = g.qubit;
         
-                        if (b - a > 1) {
-                            for (int k = a; k < b - 1; ++k) {
+                        if (std::abs(b - a) > 1) { // Fixed to handle both a > b and b > a
+                            int start = std::min(a,b);
+                            int end = std::max(a,b);
+                            for (int k = start; k < end - 1; ++k) {
                                 flat_gates.push_back(make_swap_sv(k, k + 1));
                             }
-        
-                            flat_gates.push_back(make_local_c2_sv(g, b - 1, b));
-        
-                            for (int k = b - 2; k >= a; --k) {
+                            flat_gates.push_back(make_local_c2_sv(g, end - 1, end));
+                            for (int k = end - 2; k >= start; --k) {
                                 flat_gates.push_back(make_swap_sv(k, k + 1));
                             }
                         } else {
@@ -572,36 +621,34 @@ namespace NWQSim
                     if (pg.rank().value() == 0) {
                         std::cout << "\n<====================== STARTING LAYER " << layer_idx << " ======================>" << std::endl;
                     }
-
         
                     pg.barrier();
                     auto local_update_results = run_gates_parallel(layer);
         
-                    pg.barrier(); // First barrier before applying updates
                     auto start_sync = std::chrono::high_resolution_clock::now();
+                    pg.barrier(); 
                     apply_collective_updates(local_update_results);
-                    pg.barrier(); // Barrier after collective updates
+                    pg.barrier();
                     auto end_sync = std::chrono::high_resolution_clock::now();
                     
-                    // Accumulate synchronization time
                     total_synchronization_time += (end_sync - start_sync);
 
-                    if (pg.rank().value() == 0) {
+                    // === NEW: Print State After Layer ===
+                    pg.barrier();
+                    if (rank == 0) {
+                        std::cout << "\n===== MPS State after Layer " << layer_idx << " =====\n";
+                        for (IdxType q_idx = 0; q_idx < n_qubits; ++q_idx) {
+                            print_mps_tensor(q_idx);
+                        }
+                        std::cout << "===================================\n";
                         std::cout << "<====================== FINISHED LAYER " << layer_idx << " ======================>\n" << std::endl;
                     }
-        
-                    // if (rank == 0) { // Removed per-layer print to avoid clutter, total will be printed at end
-                        //std::cout << "Layer " << layer_idx
-                                  //<< " | sync_time = " << std::chrono::duration<double>(end_sync - start_sync).count() << " s" << std::endl;
-                    //}
+                    pg.barrier();
+                    // =====================================
                 }
             }
         
             pg.barrier();
-        
-            //if (rank == 0 && !sequential_gates.empty()) {
-                //std::cout << "---------- STARTING SEQUENTIAL GATES ----------" << std::endl;
-            //}
         
             for (const auto &g : sequential_gates) {
                 if (g.op_name == OP::RESET) {
@@ -613,12 +660,10 @@ namespace NWQSim
                 }
             }
         
-            if (rank == 0 && !sequential_gates.empty()) {
-              //std::cout << "---------- FINISHED SEQUENTIAL GATES ----------" << std::endl;
+            pg.barrier();
+            if (rank == 0) {
+                std::cout << "\n<==================== Simulation Kernel Finished ====================>\n";
             }
-        
-            pg.barrier(); // Final sync after all operations.
-            //if (rank == 0) //std::cout << "<== Exiting simulation_kernel." << std::endl;
         }
 
         // Replace the existing run_gates_parallel function with this one
