@@ -639,6 +639,16 @@ namespace NWQSim
             }
             M.deallocate();
             G4.deallocate();
+            
+            if (i_proc == 0) {
+                std::vector<Cplx> M2_hostbuf(M2.size());
+                M2.get(*(M2.loop_nest().begin()), M2_hostbuf);
+                printf("\n[SEQUENTIAL DIAG] M2 tensor for qubits (%lld, %lld) has %zu elements:\n", q0, q1, M2_hostbuf.size());
+                for(size_t i = 0; i < M2_hostbuf.size(); ++i) {
+                    printf("(%.3f, %.3f) ", M2_hostbuf[i].real(), M2_hostbuf[i].imag());
+                }
+                printf("\n\n");
+            }
         
             // form matrix for singular value decomposition
             Eigen::Index rows = Dl * 2;
