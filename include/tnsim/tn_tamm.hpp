@@ -981,21 +981,16 @@ namespace NWQSim
             
             sch_local_.allocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
         
-            // 2. Gather data from global distributed tensors into local tensors.
+            // 2. **FIXED**: Perform a full copy from the distributed tensors to the local tensors.
             auto start_get = std::chrono::high_resolution_clock::now();
-            
-            std::vector<Cplx> t0_buf(T0_local.size());
-            mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
-            T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
-        
-            std::vector<Cplx> t1_buf(T1_local.size());
-            mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
-            T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
-            
+            sch_local_
+                (T0_local() = mps_tensors[q0]())
+                (T1_local() = mps_tensors[q1]())
+                .execute(exec_hw);
             auto end_get = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_get - start_get);
         
-            // **DIAGNOSTIC**: Print the gathered input tensors from every rank executing this.
+            // **DIAGNOSTIC**: Print the gathered input tensors from the rank performing the compute.
             print_local_tensor_data(rank, "T0_local (Input)", T0_local);
             print_local_tensor_data(rank, "T1_local (Input)", T1_local);
             
@@ -1012,7 +1007,6 @@ namespace NWQSim
                 (M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r"))
                 .execute(exec_hw);
             
-            // **DIAGNOSTIC**: Print the merged M tensor
             print_4_index_tensor(M_local, "M_local (Merged T0*T1)", q0, q1);
                 
             sch_local_
@@ -1021,7 +1015,6 @@ namespace NWQSim
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
             
-            // **DIAGNOSTIC**: Print the final M2 result before SVD
             print_4_index_tensor(M2_local, "M2_local (Result of G4*M)", q0, q1);
         
             // 5. Perform SVD and reconstruct the new tensor data.
