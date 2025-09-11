@@ -1126,28 +1126,32 @@ namespace NWQSim
                 std::cout << ss.str(); fflush(stdout);
             }
         
-            //------------------------// 3. Build the two-qubit gate tensor G4_local.
+            // 3. Build the two-qubit gate tensor G4_local.
             tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
             G4_local.set_dense();
             sch_local_temp.allocate(G4_local).execute(exec_hw);
             
-            // CORRECTED WAY TO POPULATE A LOCAL TENSOR:
-            // Get a direct pointer to the local buffer.
-            Cplx* g4_buf = G4_local.access_local_buf();
-            size_t c = 0;
-            // Manually loop in row-major order (last index is fastest).
-            for (int p0p = 0; p0p < 2; ++p0p) {
-                for (int p1p = 0; p1p < 2; ++p1p) {
-                    for (int p0_in = 0; p0_in < 2; ++p0_in) {
-                        for (int p1_in = 0; p1_in < 2; ++p1_in, ++c) {
-                            int row = p0p * 2 + p1p;
-                            int col = p0_in * 2 + p1_in;
-                            g4_buf[c] = U4[row * 4 + col];
-                        }
-                    }
-                }
-            }
-        
+            // CORRECTED AND IDIOMATIC WAY:
+            // Iterate over each block of the local tensor and put the corresponding value.
+            for (const auto& blockid : G4_local.loop_nest()) {
+                // For a tile size of 1, the blockid is the same as the absolute index.
+                // blockid is an IndexVector {p0_prime, p1_prime, p0_in, p1_in}
+                IdxType p0_prime = blockid[0];
+                IdxType p1_prime = blockid[1];
+                IdxType p0_in    = blockid[2];
+                IdxType p1_in    = blockid[3];
+            
+                // Calculate row and column for the 4x4 gate matrix U4
+                int row = p0_prime * 2 + p1_prime;
+                int col = p0_in * 2 + p1_in;
+            
+                // Create a buffer for the single complex value of this block
+                Cplx value = U4[row * 4 + col];
+                
+                // Put this single value into the correct block
+                G4_local.put(blockid, {&value, 1});
+            } 
+
             // --- DIAGNOSTIC PRINT 3: Gate Tensor ---
             {
                 std::vector<Cplx> buf(G4_local.size());
