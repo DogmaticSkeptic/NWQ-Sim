@@ -1054,21 +1054,20 @@ namespace NWQSim
             int rank = pg.rank().value();
         
             // --- DIAGNOSTIC PRINT 0: Input U4 Array ---
-            if (rank == 0) { // Print only from one rank to avoid clutter
-                std::stringstream ss;
-                ss << std::fixed << std::setprecision(3);
-                ss << "[RANK " << rank << "] --- U4 Gate Matrix (Input Array) on Qubits (" << q0 << ", " << q1 << ") ---" << std::endl;
-                for (int i = 0; i < 4; ++i) {
-                    ss << "[RANK " << rank << "] [ ";
-                    for (int j = 0; j < 4; ++j) {
-                        const auto& val = U4[i * 4 + j];
-                        ss << "(" << val.real() << "," << val.imag() << ") ";
-                    }
-                    ss << "]" << std::endl;
+            // This print remains useful to confirm the correct gate matrix is being used.
+            std::stringstream ss_u4;
+            ss_u4 << std::fixed << std::setprecision(3);
+            ss_u4 << "[RANK " << rank << "] --- U4 Gate Matrix (Input Array) on Qubits (" << q0 << ", " << q1 << ") ---" << std::endl;
+            for (int i = 0; i < 4; ++i) {
+                ss_u4 << "[RANK " << rank << "] [ ";
+                for (int j = 0; j < 4; ++j) {
+                    const auto& val = U4[i * 4 + j];
+                    ss_u4 << "(" << val.real() << "," << val.imag() << ") ";
                 }
-                ss << "[RANK " << rank << "] --- End U4 Gate Matrix ---" << std::endl;
-                std::cout << ss.str(); fflush(stdout);
+                ss_u4 << "]" << std::endl;
             }
+            ss_u4 << "[RANK " << rank << "] --- End U4 Gate Matrix ---" << std::endl;
+            std::cout << ss_u4.str(); fflush(stdout);
         
             // Create a temporary, self-contained local execution environment.
             auto start_res_mgmt = std::chrono::high_resolution_clock::now();
@@ -1084,14 +1083,12 @@ namespace NWQSim
         
             auto start_get = std::chrono::high_resolution_clock::now();
             
-            // CORRECTED: Explicitly use the tamm:: namespace for IndexVector
             block_for(ec_local, T0_local(), [&](const tamm::IndexVector& blockid){
                 std::vector<Cplx> buf(T0_local.block_size(blockid));
                 mps_tensors[q0].get(blockid, buf); 
                 T0_local.put(blockid, buf);
             });
         
-            // CORRECTED: Explicitly use the tamm:: namespace for IndexVector
             block_for(ec_local, T1_local(), [&](const tamm::IndexVector& blockid){
                 std::vector<Cplx> buf(T1_local.block_size(blockid));
                 mps_tensors[q1].get(blockid, buf); 
@@ -1101,21 +1098,6 @@ namespace NWQSim
             auto end_get = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_get - start_get);
         
-            // --- DIAGNOSTIC PRINT 1: Input Tensors ---
-            {
-                const Cplx* t0_buf_ptr = T0_local.access_local_buf();
-                const Cplx* t1_buf_ptr = T1_local.access_local_buf();
-                std::stringstream ss;
-                ss << std::fixed << std::setprecision(3);
-                ss << "[RANK " << rank << "] --- T0_local (Input) ---" << std::endl << "[RANK " << rank << "] [ ";
-                for (size_t i = 0; i < T0_local.size(); ++i) { ss << "(" << t0_buf_ptr[i].real() << "," << t0_buf_ptr[i].imag() << ") "; }
-                ss << "]" << std::endl << "[RANK " << rank << "] --- End T0_local (Input) ---" << std::endl;
-                ss << "[RANK " << rank << "] --- T1_local (Input) ---" << std::endl << "[RANK " << rank << "] [ ";
-                for (size_t i = 0; i < T1_local.size(); ++i) { ss << "(" << t1_buf_ptr[i].real() << "," << t1_buf_ptr[i].imag() << ") "; }
-                ss << "]" << std::endl << "[RANK " << rank << "] --- End T1_local (Input) ---" << std::endl;
-                std::cout << ss.str(); fflush(stdout);
-            }
-        
             // 2. Merge the local tensors.
             tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M_local.set_dense();
@@ -1123,17 +1105,6 @@ namespace NWQSim
             
             auto start_contraction = std::chrono::high_resolution_clock::now();
             sch_local_temp(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
-        
-            // --- DIAGNOSTIC PRINT 2: Merged Tensor ---
-            {
-                const Cplx* m_buf_ptr = M_local.access_local_buf();
-                std::stringstream ss;
-                ss << "[RANK " << rank << "] --- Merged Tensor (M_local) ---" << std::endl << "[RANK " << rank << "] [ ";
-                ss << std::fixed << std::setprecision(3);
-                for (size_t i = 0; i < M_local.size(); ++i) { ss << "(" << m_buf_ptr[i].real() << "," << m_buf_ptr[i].imag() << ") "; }
-                ss << "]" << std::endl << "[RANK " << rank << "] --- End Merged Tensor (M_local) ---" << std::endl;
-                std::cout << ss.str(); fflush(stdout);
-            }
         
             // 3. Build the two-qubit gate tensor G4_local.
             tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
@@ -1152,17 +1123,6 @@ namespace NWQSim
                 Cplx value = U4[row * 4 + col];
                 G4_local.put(blockid, {&value, 1});
             } 
-        
-            // --- DIAGNOSTIC PRINT 3: Gate Tensor ---
-            {
-                const Cplx* g4_buf_ptr = G4_local.access_local_buf();
-                std::stringstream ss;
-                ss << "[RANK " << rank << "] --- G4_local Gate ---" << std::endl << "[RANK " << rank << "] [ ";
-                ss << std::fixed << std::setprecision(3);
-                for (size_t i = 0; i < G4_local.size(); ++i) { ss << "(" << g4_buf_ptr[i].real() << "," << g4_buf_ptr[i].imag() << ") "; }
-                ss << "]" << std::endl << "[RANK " << rank << "] --- End G4_local Gate ---" << std::endl;
-                std::cout << ss.str(); fflush(stdout);
-            }
             
             // 4. Apply the gate to get the result tensor M2_local.
             tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
@@ -1172,34 +1132,9 @@ namespace NWQSim
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
         
-            // --- DIAGNOSTIC PRINT 4: Result Tensor ---
-            {
-                const Cplx* m2_buf_ptr = M2_local.access_local_buf();
-                std::stringstream ss;
-                ss << "[RANK " << rank << "] --- Result after Gate Application (M2_local) ---" << std::endl << "[RANK " << rank << "] [ ";
-                ss << std::fixed << std::setprecision(3);
-                for (size_t i = 0; i < M2_local.size(); ++i) { ss << "(" << m2_buf_ptr[i].real() << "," << m2_buf_ptr[i].imag() << ") "; }
-                ss << "]" << std::endl << "[RANK " << rank << "] --- End Result after Gate Application (M2_local) ---" << std::endl;
-                std::cout << ss.str(); fflush(stdout);
-            }
-        
             // 5. Perform SVD and reconstruct the new tensor data.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
-            
-            // --- DIAGNOSTIC PRINT 5: SVD Results ---
-            if (rank == 0) {
-                std::stringstream ss_svd;
-                ss_svd << "--- Result after SVD ---" << std::endl;
-                ss_svd << std::fixed << std::setprecision(3);
-                ss_svd << "New T0 data: [ ";
-                for(const auto& val : Ti_new_data) { ss_svd << "(" << val.real() << "," << val.imag() << ") "; }
-                ss_svd << "]" << std::endl;
-                ss_svd << "New T1 data: [ ";
-                for(const auto& val : Tj_new_data) { ss_svd << "(" << val.real() << "," << val.imag() << ") "; }
-                ss_svd << "]" << std::endl << "--- End SVD Result ---" << std::endl;
-                std::cout << ss_svd.str(); fflush(stdout);
-            }
             
             // 6. Clean up all temporary local resources.
             sch_local_temp.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
@@ -1318,7 +1253,6 @@ namespace NWQSim
             IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
-            //std::cout << "[RANK " << rank << "] ---> local_svd_and_reconstruct_data (EIGEN): Entered for qubits (" << q0 << ", " << q1 << ")." << std::endl;
         
             // 1. Extract dimensions from the input tensor
             const IdxType phys_dim = 2;
@@ -1334,24 +1268,33 @@ namespace NWQSim
             std::vector<Cplx> M2_hostbuf(M2_local.size());
             M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
         
+            // ================== NEW PRINT STATEMENT #1 ==================
+            // Print the raw host buffer immediately after getting it from the tensor.
+            std::cout << "[RANK " << rank << "] SVD_DEBUG: M2_hostbuf contents for qubits (" << q0 << ", " << q1 << "):" << std::endl;
+            for(size_t i = 0; i < M2_hostbuf.size(); ++i) {
+                std::cout << "  [" << i << "]: (" << M2_hostbuf[i].real() << ", " << M2_hostbuf[i].imag() << ")" << std::endl;
+            }
+            // ============================================================
+        
             size_t c = 0;
             for (size_t l = 0; l < Dl; ++l) {
                 for (size_t p0 = 0; p0 < phys_dim; ++p0) {
                     for (size_t p1 = 0; p1 < phys_dim; ++p1) {
                         for (size_t r = 0; r < Dr; ++r, ++c) {
-                            // Eigen's operator() handles the column-major layout automatically.
                             mat(l * phys_dim + p0, p1 * Dr + r) = M2_hostbuf[c];
                         }
                     }
                 }
             }
-
-//std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): Reshape to Eigen matrix complete." << std::endl;
+        
+            // ================== NEW PRINT STATEMENT #2 ==================
+            // Print the Eigen matrix right before it's passed to the SVD algorithm.
+            std::cout << "[RANK " << rank << "] SVD_DEBUG: Eigen matrix 'mat' before SVD for qubits (" << q0 << ", " << q1 << "):" << std::endl << mat << std::endl;
+            // ============================================================
             
             // 3. Compute the SVD using Eigen's robust BDCSVD.
             Eigen::BDCSVD<decltype(mat)> svd(mat, Eigen::ComputeThinU | Eigen::ComputeThinV);
             auto svals = svd.singularValues();
-            //std::cout << "[RANK " << rank << "] local_svd_and_reconstruct_data (EIGEN): SVD computation complete." << std::endl;
         
             // 4. Truncate based on singular value cutoff and max bond dimension.
             std::vector<IdxType> keep;
@@ -1366,38 +1309,16 @@ namespace NWQSim
             if (chi == 0 && svals.size() > 0) {
                 chi = 1; // Prevent bond dimension from ever becoming zero.
             }
-
+        
             std::cout << "\n[PARALLEL SVD DIAG RANK " << rank << "] Qubits (" << q0 << ", " << q1 
                       << "), chi=" << chi << std::endl;
             
-            // Print singular values
             std::cout << "  Singular values: ";
             for (IdxType k = 0; k < chi; ++k) {
                 std::cout << svals(keep[k]) << " ";
             }
             std::cout << std::endl;
             
-            // Extract and print first few elements of Umat and Vh
-            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat_dbg(mat.rows(), chi);
-            Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Vh_dbg(chi, mat.cols());
-            for (IdxType k = 0; k < chi; ++k) {
-                IdxType i = keep[k];
-                Umat_dbg.col(k) = svd.matrixU().col(i);
-                Vh_dbg.row(k)   = svd.matrixV().col(i).adjoint();
-            }
-            
-            std::cout << "  Umat (first 4): ";
-            for(int i=0; i < std::min((long)4, Umat_dbg.size()); ++i) {
-                std::cout << "(" << Umat_dbg.data()[i].real() << "," << Umat_dbg.data()[i].imag() << ") ";
-            }
-            std::cout << std::endl;
-            
-            std::cout << "  Vh (first 4): ";
-            for(int i=0; i < std::min((long)4, Vh_dbg.size()); ++i) {
-                std::cout << "(" << Vh_dbg.data()[i].real() << "," << Vh_dbg.data()[i].imag() << ") ";
-            }
-            std::cout << std::endl << std::endl;
-
             // 5. Extract the truncated U, S, and Vh matrices.
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat(mat.rows(), chi);
             Eigen::Matrix<Cplx, Eigen::Dynamic, 1> kept_svals(chi);
@@ -1434,10 +1355,8 @@ namespace NWQSim
                 }
             }
         
-            //std::cout << "[RANK " << rank << "] <--- local_svd_and_reconstruct_data (EIGEN): Exiting." << std::endl;
             return chi;
         }
-
 
 //        IdxType local_svd_and_reconstruct_data(
 //            tamm::Tensor<Cplx>& M2_local,
