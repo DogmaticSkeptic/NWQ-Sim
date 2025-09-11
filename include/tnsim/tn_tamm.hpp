@@ -1126,30 +1126,27 @@ namespace NWQSim
                 std::cout << ss.str(); fflush(stdout);
             }
         
-            //-----------------------------------------// 3. Build the two-qubit gate tensor G4_local.
+            //------------------------// 3. Build the two-qubit gate tensor G4_local.
             tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
             G4_local.set_dense();
             sch_local_temp.allocate(G4_local).execute(exec_hw);
             
-            // Define a lambda function to fill each block of the G4_local tensor
-            auto fill_g4_lambda = [&](const tamm::IndexVector& blockid, tamm::span<Cplx> buff){
-                // blockid contains {p0_prime, p1_prime, p0_in, p1_in}
-                IdxType p0_prime = blockid[0];
-                IdxType p1_prime = blockid[1];
-                IdxType p0_in    = blockid[2];
-                IdxType p1_in    = blockid[3];
-            
-                // Calculate row and column for the 4x4 gate matrix U4
-                int row = p0_prime * 2 + p1_prime;
-                int col = p0_in * 2 + p1_in;
-            
-                // The buffer for each block has size 1, so we set the first element
-                buff[0] = U4[row * 4 + col];
-            };
-            
-            // Use tamm::update_tensor to apply the lambda to every block
-            tamm::update_tensor(G4_local, fill_g4_lambda);
-            //-------------------------
+            // CORRECTED WAY TO POPULATE A LOCAL TENSOR:
+            // Get a direct pointer to the local buffer.
+            Cplx* g4_buf = G4_local.access_local_buf();
+            size_t c = 0;
+            // Manually loop in row-major order (last index is fastest).
+            for (int p0p = 0; p0p < 2; ++p0p) {
+                for (int p1p = 0; p1p < 2; ++p1p) {
+                    for (int p0_in = 0; p0_in < 2; ++p0_in) {
+                        for (int p1_in = 0; p1_in < 2; ++p1_in, ++c) {
+                            int row = p0p * 2 + p1p;
+                            int col = p0_in * 2 + p1_in;
+                            g4_buf[c] = U4[row * 4 + col];
+                        }
+                    }
+                }
+            }
         
             // --- DIAGNOSTIC PRINT 3: Gate Tensor ---
             {
