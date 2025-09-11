@@ -977,6 +977,90 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
 
+        // In TN_TAMM class
+        LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
+        {
+            int rank = pg.rank().value();
+            
+            auto start_res_mgmt = std::chrono::high_resolution_clock::now();
+            
+            // 1. Create local tensors for the computation.
+            tamm::Tensor<Cplx> T0_local({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
+            tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
+            tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+            tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
+            tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+        
+            T0_local.set_dense(); T1_local.set_dense(); M_local.set_dense();
+            G4_local.set_dense(); M2_local.set_dense();
+            
+            sch_local_.allocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
+        
+            // 2. Gather data from global distributed tensors into local tensors.
+            auto start_get = std::chrono::high_resolution_clock::now();
+            
+            std::vector<Cplx> t0_buf(T0_local.size());
+            mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
+            T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
+        
+            std::vector<Cplx> t1_buf(T1_local.size());
+            mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
+            T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
+            
+            auto end_get = std::chrono::high_resolution_clock::now();
+            total_data_movement_time += (end_get - start_get);
+        
+            // **DIAGNOSTIC**: Print the gathered input tensors from every rank executing this.
+            print_local_tensor_data(rank, "T0_local (Input)", T0_local);
+            print_local_tensor_data(rank, "T1_local (Input)", T1_local);
+            
+            // 3. Build the two-qubit gate tensor G4_local by accessing its buffer directly.
+            Cplx* g4_buf = G4_local.access_local_buf();
+            for (size_t i = 0; i < 16; ++i) {
+                g4_buf[i] = U4[i];
+            }
+            print_4_index_tensor(G4_local, "G4_local (Gate Matrix)", q0, q1);
+            
+            // 4. Perform the contractions.
+            auto start_contraction = std::chrono::high_resolution_clock::now();
+            sch_local_
+                (M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r"))
+                .execute(exec_hw);
+            
+            // **DIAGNOSTIC**: Print the merged M tensor
+            print_4_index_tensor(M_local, "M_local (Merged T0*T1)", q0, q1);
+                
+            sch_local_
+                (M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r"))
+                .execute(exec_hw);
+            auto end_contraction = std::chrono::high_resolution_clock::now();
+            total_contraction_time += (end_contraction - start_contraction);
+            
+            // **DIAGNOSTIC**: Print the final M2 result before SVD
+            print_4_index_tensor(M2_local, "M2_local (Result of G4*M)", q0, q1);
+        
+            // 5. Perform SVD and reconstruct the new tensor data.
+            std::vector<Cplx> Ti_new_data, Tj_new_data;
+            IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
+            
+            // 6. Clean up all temporary local resources.
+            sch_local_.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
+            auto end_res_mgmt = std::chrono::high_resolution_clock::now();
+            total_resource_management_time += (end_res_mgmt - start_res_mgmt);
+        
+            // 7. Construct and return the result object.
+            LocalGateResult result;
+            result.is_valid = true;
+            result.q0 = q0;
+            result.q1 = q1;
+            result.new_bond_dim = new_bond_dim;
+            result.new_T0_data = std::move(Ti_new_data);
+            result.new_T1_data = std::move(Tj_new_data);
+            result.original_rank = rank;
+            
+            return result;
+        }
+
         void C1_GATE_local_kernel(tamm::Tensor<Cplx>& target_tensor, IdxType q_idx, const std::array<Cplx, 4>& U)
         {
             int rank = pg.rank().value();
@@ -1003,11 +1087,9 @@ namespace NWQSim
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
         
             // --- Populate the local gate matrix tensor ---
-            // **FIXED**: Directly access the buffer instead of using fill_tensor for local tensors.
             Cplx* g_local_buf = G_local.access_local_buf();
             for (tamm::Index p_prime = 0; p_prime < 2; ++p_prime) {
                 for (tamm::Index p_in = 0; p_in < 2; ++p_in) {
-                    // The buffer layout is row-major, matching the 2D array U.
                     g_local_buf[p_prime * 2 + p_in] = U[p_prime * 2 + p_in];
                 }
             }
@@ -1053,78 +1135,6 @@ namespace NWQSim
         }
 
 
-        void C1_GATE_local_kernel(tamm::Tensor<Cplx>& target_tensor, IdxType q_idx, const std::array<Cplx, 4>& U)
-        {
-            int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] --> C1_GATE_local_kernel on qubit " << q_idx << "." << std::endl;
-            
-            // --- Setup a temporary, self-contained local execution environment ---
-            auto start_res_mgmt = std::chrono::high_resolution_clock::now();
-            tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
-            tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
-            tamm::Scheduler sch_local{ec_local};
-        
-            // --- Define local tensor shapes based on the global tensor ---
-            auto tis_l = target_tensor.tiled_index_spaces()[0];
-            auto tis_p = target_tensor.tiled_index_spaces()[1];
-            auto tis_r = target_tensor.tiled_index_spaces()[2];
-        
-            tamm::Tensor<Cplx> G_local({tis_p, tis_p});
-            tamm::Tensor<Cplx> T_new_local({tis_l, tis_p, tis_r});
-            tamm::Tensor<Cplx> T_in_local({tis_l, tis_p, tis_r});
-            G_local.set_dense(); T_new_local.set_dense(); T_in_local.set_dense();
-        
-            sch_local.allocate(G_local, T_new_local, T_in_local).execute(exec_hw);
-            auto end_res_mgmt = std::chrono::high_resolution_clock::now();
-            total_resource_management_time += (end_res_mgmt - start_res_mgmt);
-        
-            // --- Populate the local gate matrix tensor ---
-            Cplx* g_local_buf = G_local.access_local_buf();
-            for (tamm::Index p_prime = 0; p_prime < 2; ++p_prime) {
-                for (tamm::Index p_in = 0; p_in < 2; ++p_in) {
-                    g_local_buf[p_prime * 2 + p_in] = U[p_prime * 2 + p_in];
-                }
-            }
-            
-            // --- Get data from global tensor into a local TAMM tensor ---
-            auto start_get = std::chrono::high_resolution_clock::now();
-            std::vector<Cplx> t_in_buf(T_in_local.size());
-            target_tensor.get(*(target_tensor.loop_nest().begin()), t_in_buf);
-            T_in_local.put(*(T_in_local.loop_nest().begin()), t_in_buf);
-            auto end_get = std::chrono::high_resolution_clock::now();
-            total_data_movement_time += (end_get - start_get);
-            
-            // **DIAGNOSTIC PRINT (INPUT)**
-            print_buffer_diag("C1 INPUT TENSOR", q_idx, t_in_buf);
-        
-            // --- Perform the contraction using TAMM's scheduler ---
-            auto start_contraction = std::chrono::high_resolution_clock::now();
-            sch_local(T_new_local("l","p'","r") = G_local("p'","p") * T_in_local("l","p","r")).execute(exec_hw);
-            auto end_contraction = std::chrono::high_resolution_clock::now();
-            total_contraction_time += (end_contraction - start_contraction);
-        
-            // --- Get the result from the local result tensor ---
-            std::vector<Cplx> t_out_buf(T_new_local.size());
-            T_new_local.get(*(T_new_local.loop_nest().begin()), t_out_buf);
-            
-            // **DIAGNOSTIC PRINT (OUTPUT)**
-            print_buffer_diag("C1 OUTPUT TENSOR", q_idx, t_out_buf);
-        
-            // --- Put the result back into the global tensor ---
-            auto start_put = std::chrono::high_resolution_clock::now();
-            target_tensor.put(*(target_tensor.loop_nest().begin()), t_out_buf);
-            auto end_put = std::chrono::high_resolution_clock::now();
-            total_data_movement_time += (end_put - start_put);
-            
-            // --- Clean up local resources ---
-            start_res_mgmt = std::chrono::high_resolution_clock::now();
-            sch_local.deallocate(G_local, T_new_local, T_in_local).execute(exec_hw);
-            self_pg.destroy_coll();
-            end_res_mgmt = std::chrono::high_resolution_clock::now();
-            total_resource_management_time += (end_res_mgmt - start_res_mgmt);
-            
-            std::cout << "[RANK " << rank << "] <-- C1_GATE_local_kernel on qubit " << q_idx << " finished." << std::endl;
-        }
 
         void gpu_svd_jacobi(
             const Cplx* A_h, int m, int n,
