@@ -1093,29 +1093,16 @@ namespace NWQSim
             }
             
             //------------------------------------------------------------------
-            // FIXED: Gate construction logic is replaced with the robust method
-            // from the sequential version to ensure correct memory mapping.
+            // FIXED: Gate construction logic is replaced with the robust
+            // tamm::update_tensor function to guarantee correct memory mapping.
             //------------------------------------------------------------------
-            for (const auto &blockid : G4_local.loop_nest())
-            {
-                size_t bs = G4_local.block_size(blockid);
-                std::vector<Cplx> g4_buf(bs);
-                auto dims = G4_local.block_dims(blockid);
-                auto offs = G4_local.block_offsets(blockid);
-                size_t c = 0;
-                for (size_t p0p = offs[0]; p0p < offs[0] + dims[0]; ++p0p) {
-                    for (size_t p1p = offs[1]; p1p < offs[1] + dims[1]; ++p1p) {
-                        for (size_t p0_in = offs[2]; p0_in < offs[2] + dims[2]; ++p0_in) {
-                            for (size_t p1_in = offs[3]; p1_in < offs[3] + dims[3]; ++p1_in, ++c) {
-                                int row = int(p0p * 2 + p1p);
-                                int col = int(p0_in * 2 + p1_in);
-                                g4_buf[c] = U4[row * 4 + col];
-                            }
-                        }
-                    }
-                }
-                G4_local.put(blockid, g4_buf);
-            }
+            auto fill_g4 = [&](const tamm::IndexVector& iv) {
+                // iv contains the indices for the current element: {p0p, p1p, p0_in, p1_in}
+                int row = iv[0] * 2 + iv[1];
+                int col = iv[2] * 2 + iv[3];
+                return U4[row * 4 + col];
+            };
+            tamm::update_tensor(G4_local, fill_g4);
             //------------------------------------------------------------------
             // END OF FIX
             //------------------------------------------------------------------
