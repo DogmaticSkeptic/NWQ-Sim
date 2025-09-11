@@ -1070,6 +1070,7 @@ namespace NWQSim
                 std::cout << ss.str(); fflush(stdout);
             }
         
+            // Create a temporary, self-contained local execution environment.
             auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
             tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
@@ -1078,6 +1079,7 @@ namespace NWQSim
             // 1. Create and populate local copies of the input tensors T0 and T1.
             tamm::Tensor<Cplx> T0_local({bond_tis[q0], phys_tis[q0], bond_tis[q0 + 1]});
             tamm::Tensor<Cplx> T1_local({bond_tis[q1], phys_tis[q1], bond_tis[q1 + 1]});
+            T0_local.set_dense(); T1_local.set_dense();
             sch_local_temp.allocate(T0_local, T1_local).execute(exec_hw);
         
             auto start_get = std::chrono::high_resolution_clock::now();
@@ -1091,7 +1093,7 @@ namespace NWQSim
             auto end_get = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_get - start_get);
         
-            // --- DIAGNOSTIC PRINT 1 --- (Verifying T0/T1 are correct)
+            // --- DIAGNOSTIC PRINT 1: Input Tensors ---
             {
                 std::stringstream ss;
                 ss << std::fixed << std::setprecision(3);
@@ -1104,14 +1106,15 @@ namespace NWQSim
                 std::cout << ss.str(); fflush(stdout);
             }
         
-            // 2. Merge local tensors.
+            // 2. Merge the local tensors.
             tamm::Tensor<Cplx> M_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+            M_local.set_dense();
             sch_local_temp.allocate(M_local).execute(exec_hw);
             
             auto start_contraction = std::chrono::high_resolution_clock::now();
             sch_local_temp(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
         
-            // --- DIAGNOSTIC PRINT 2 --- (Verifying M_local is correct)
+            // --- DIAGNOSTIC PRINT 2: Merged Tensor ---
             {
                 std::vector<Cplx> buf(M_local.size());
                 M_local.get(*(M_local.loop_nest().begin()), buf);
@@ -1123,47 +1126,52 @@ namespace NWQSim
                 std::cout << ss.str(); fflush(stdout);
             }
         
-            //------------------------------------------------------------------
-            // THE FIX:
-            // Bypass the creation and buggy population of G4_local.
-            // Instead, perform the contraction manually on the host.
-            //------------------------------------------------------------------
-            tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
-            sch_local_temp.allocate(M2_local).execute(exec_hw);
-        
-            std::vector<Cplx> m_local_buf(M_local.size());
-            M_local.get(*(M_local.loop_nest().begin()), m_local_buf);
-        
-            std::vector<Cplx> m2_local_buf(M2_local.size(), {0.0, 0.0});
-        
-            const IdxType Dl = M_local.tiled_index_spaces()[0].index_space().num_indices();
-            const IdxType Dr = M_local.tiled_index_spaces()[3].index_space().num_indices();
+            //-----------------------------------------// 3. Build the two-qubit gate tensor G4_local.
+            tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
+            G4_local.set_dense();
+            sch_local_temp.allocate(G4_local).execute(exec_hw);
             
-            size_t c_in = 0;
-            for (size_t l = 0; l < Dl; ++l) {
-              for (size_t p0_in = 0; p0_in < 2; ++p0_in) {
-                for (size_t p1_in = 0; p1_in < 2; ++p1_in) {
-                  for (size_t r = 0; r < Dr; ++r, ++c_in) {
-                    for (size_t p0p = 0; p0p < 2; ++p0p) {
-                      for (size_t p1p = 0; p1p < 2; ++p1p) {
-                        int row = p0p * 2 + p1p;
-                        int col = p0_in * 2 + p1_in;
-                        size_t c_out = l * (2 * 2 * Dr) + p0p * (2 * Dr) + p1p * Dr + r;
-                        m2_local_buf[c_out] += U4[row * 4 + col] * m_local_buf[c_in];
-                      }
-                    }
-                  }
-                }
-              }
+            // Define a lambda function to fill each block of the G4_local tensor
+            auto fill_g4_lambda = [&](const tamm::IndexVector& blockid, tamm::span<Cplx> buff){
+                // blockid contains {p0_prime, p1_prime, p0_in, p1_in}
+                IdxType p0_prime = blockid[0];
+                IdxType p1_prime = blockid[1];
+                IdxType p0_in    = blockid[2];
+                IdxType p1_in    = blockid[3];
+            
+                // Calculate row and column for the 4x4 gate matrix U4
+                int row = p0_prime * 2 + p1_prime;
+                int col = p0_in * 2 + p1_in;
+            
+                // The buffer for each block has size 1, so we set the first element
+                buff[0] = U4[row * 4 + col];
+            };
+            
+            // Use tamm::update_tensor to apply the lambda to every block
+            tamm::update_tensor(G4_local, fill_g4_lambda);
+            //-------------------------
+        
+            // --- DIAGNOSTIC PRINT 3: Gate Tensor ---
+            {
+                std::vector<Cplx> buf(G4_local.size());
+                G4_local.get(*(G4_local.loop_nest().begin()), buf);
+                std::stringstream ss;
+                ss << "[RANK " << rank << "] --- G4_local Gate ---" << std::endl << "[RANK " << rank << "] [ ";
+                ss << std::fixed << std::setprecision(3);
+                for (const auto& val : buf) { ss << "(" << val.real() << "," << val.imag() << ") "; }
+                ss << "]" << std::endl << "[RANK " << rank << "] --- End G4_local Gate ---" << std::endl;
+                std::cout << ss.str(); fflush(stdout);
             }
             
-            M2_local.put(*(M2_local.loop_nest().begin()), m2_local_buf);
-            //------------------------------------------------------------------
-        
+            // 4. Apply the gate to get the result tensor M2_local.
+            tamm::Tensor<Cplx> M2_local({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
+            M2_local.set_dense();
+            sch_local_temp.allocate(M2_local).execute(exec_hw);
+            sch_local_temp(M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r")).execute(exec_hw);
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
         
-            // --- DIAGNOSTIC PRINT 4 --- (Verifying M2_local is now correct)
+            // --- DIAGNOSTIC PRINT 4: Result Tensor ---
             {
                 std::vector<Cplx> buf(M2_local.size());
                 M2_local.get(*(M2_local.loop_nest().begin()), buf);
@@ -1175,7 +1183,7 @@ namespace NWQSim
                 std::cout << ss.str(); fflush(stdout);
             }
         
-            // 5. Perform SVD and reconstruct data.
+            // 5. Perform SVD and reconstruct the new tensor data.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
             
@@ -1193,13 +1201,13 @@ namespace NWQSim
                 std::cout << ss_svd.str(); fflush(stdout);
             }
         
-            // 6. Clean up.
-            sch_local_temp.deallocate(T0_local, T1_local, M_local, M2_local).execute(exec_hw);
+            // 6. Clean up all temporary local resources.
+            sch_local_temp.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
             self_pg.destroy_coll();
             auto end_res_mgmt = std::chrono::high_resolution_clock::now();
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
         
-            // 7. Construct and return result.
+            // 7. Construct and return the result object.
             LocalGateResult result;
             result.is_valid = true;
             result.q0 = q0;
