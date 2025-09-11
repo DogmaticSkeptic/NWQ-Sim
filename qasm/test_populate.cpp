@@ -4,7 +4,7 @@
 #include <complex>
 #include <iomanip>
 #include <array>
-#include <functional> // Required for std::function
+#include <functional> 
 
 // Use shorter aliases for convenience
 using Cplx = std::complex<double>;
@@ -84,31 +84,9 @@ int main(int argc, char* argv[]) {
             Cplx(-0.441,-0.147), Cplx( 0.181,-0.387), Cplx(-0.391, 0.458), Cplx(-0.236,-0.428)
         };
         
-        // Define the lambda to populate the G4 tensor block
-        auto fill_g4_lambda = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
-            auto block_dims = G4_local.block_dims(bid);
-            size_t d1 = block_dims[0];
-            size_t d2 = block_dims[1];
-            size_t d3 = block_dims[2];
-            size_t d4 = block_dims[3];
-
-            size_t c = 0; // Counter for the 1D buffer 'buf'
-            for (size_t p0p = 0; p0p < d1; ++p0p) {
-                for (size_t p1p = 0; p1p < d2; ++p1p) {
-                    for (size_t p0_in = 0; p0_in < d3; ++p0_in) {
-                        for (size_t p1_in = 0; p1_in < d4; ++p1_in) {
-                            size_t row = p0p * 2 + p1p;
-                            size_t col = p0_in * 2 + p1_in;
-                            buf[c++] = U4[row * 4 + col];
-                        }
-                    }
-                }
-            }
-        };
-
-        // *** FIX: Explicitly create a std::function to match the function signature ***
-        std::function<void(const tamm::IndexVector&, tamm::span<Cplx>)> fill_g4_func = fill_g4_lambda;
-        tamm::fill_tensor(G4_local(), fill_g4_func);
+        // *** FIX: Use a direct block-wise put operation for initialization. ***
+        // The tensor has one block with id {0,0,0,0}. We put the entire U4 array into it.
+        G4_local.put({0, 0, 0, 0}, {U4.data(), 16});
 
 
         // Populate M_local to represent the |00> state vector [1, 0, 0, 0]
