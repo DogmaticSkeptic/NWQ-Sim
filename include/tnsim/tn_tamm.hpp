@@ -479,27 +479,20 @@ namespace NWQSim
                       << " | norm=" << std::sqrt(norm_sq) << " | data=[" << ss.str() << "...]" << std::endl;
         }
 
+        // In TN_TAMM class
         void print_mps_tensor(IdxType site)
         {
-            // Only rank 0 is responsible for printing to avoid console spam
             if (pg.rank().value() != 0) {
                 return;
             }
-        
-            // Get the tensor and its dimensions
             auto& T = mps_tensors[site];
             IdxType Dl = bond_dims[site];
             IdxType Dp = phys_dims[site];
             IdxType Dr = bond_dims[site + 1];
         
-            // On rank 0, create a host buffer and use T.get() to pull the data
-            // from its distributed location into this local buffer.
-            std::vector<Cplx> hostbuf(T.size());
-            // For a distributed tensor with one block per rank, getting the first block
-            // retrieves all local data.
-            T.get(*(T.loop_nest().begin()), hostbuf);
-        
-            // Print the formatted output
+            // **FIXED**: Directly access the entire local buffer for printing.
+            Cplx* hostbuf = T.access_local_buf();
+            
             printf("--- Tensor T_%lld ---\n", site);
             printf("Dimensions: [l=%lld, p=%lld, r=%lld]\n", Dl, Dp, Dr);
             
@@ -509,7 +502,6 @@ namespace NWQSim
                 for (IdxType p = 0; p < Dp; ++p) {
                     printf("    p=%lld: [ ", p);
                     for (IdxType r = 0; r < Dr; ++r) {
-                        // To avoid printing tiny numbers from floating point inaccuracies
                         double real_part = std::abs(hostbuf[idx].real()) < 1e-10 ? 0.0 : hostbuf[idx].real();
                         double imag_part = std::abs(hostbuf[idx].imag()) < 1e-10 ? 0.0 : hostbuf[idx].imag();
                         printf("(%.3f, %.3f) ", real_part, imag_part);
@@ -520,19 +512,15 @@ namespace NWQSim
             }
         }
         
-        // Helper to print a 4-index local tensor
         void print_4_index_tensor(tamm::Tensor<Cplx>& T, const std::string& name, IdxType q0, IdxType q1) {
             int rank = pg.rank().value();
-        
-            // Get dimensions directly from the local tensor's index spaces
             IdxType Dl = T.tiled_index_spaces()[0].index_space().num_indices();
             IdxType Dp0 = T.tiled_index_spaces()[1].index_space().num_indices();
             IdxType Dp1 = T.tiled_index_spaces()[2].index_space().num_indices();
             IdxType Dr = T.tiled_index_spaces()[3].index_space().num_indices();
         
-            // **FIXED**: Directly access the local buffer for the entire tensor.
+            // **FIXED**: Directly access the entire local buffer for printing.
             Cplx* hostbuf = T.access_local_buf();
-            size_t num_elements = T.size();
         
             printf("[RANK %d] --- Contents of %s for Qubits (%lld, %lld) ---\n", rank, name.c_str(), q0, q1);
             printf("[RANK %d] Dimensions: [l=%lld, p0=%lld, p1=%lld, r=%lld]\n", rank, Dl, Dp0, Dp1, Dr);
@@ -554,18 +542,15 @@ namespace NWQSim
             }
             printf("[RANK %d] --- End of %s ---\n", rank, name.c_str());
         }
-
-        // Helper function to print a local tensor's data from a specific rank.
+        
         void print_local_tensor_data(int rank, const std::string& name, tamm::Tensor<Cplx>& tensor) {
-            // This function will now print from whichever rank calls it.
             std::cout << "--- " << name << " [FROM RANK " << rank << "] ---" << std::endl;
-            std::vector<Cplx> buf(tensor.size());
-            // Get the data from the tensor into a local buffer
-            tensor.get(*(tensor.loop_nest().begin()), buf);
+            // **FIXED**: Directly access the entire local buffer for printing.
+            Cplx* buf = tensor.access_local_buf();
             
-            // Print the buffer contents
             std::cout << "[ ";
-            for (const auto& val : buf) {
+            for (size_t i = 0; i < tensor.size(); ++i) {
+                const auto& val = buf[i];
                 std::cout << "(" << val.real() << "," << val.imag() << ") ";
             }
             std::cout << "]" << std::endl << "--- End " << name << " ---" << std::endl;
@@ -1227,6 +1212,7 @@ namespace NWQSim
             //std::cout << "[RANK " << rank << "] <--- gpu_svd_jacobi: Exiting." << std::endl;
         }
 
+        // In TN_TAMM class
         IdxType local_svd_and_reconstruct_data(
             tamm::Tensor<Cplx>& M2_local,
             std::vector<Cplx>& Ti_new_data,
@@ -1246,17 +1232,16 @@ namespace NWQSim
             // 2. Reshape the row-major TAMM tensor data into a column-major Eigen matrix.
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> mat(m, n);
             
-            std::vector<Cplx> M2_hostbuf(M2_local.size());
-            M2_local.get(*(M2_local.loop_nest().begin()), M2_hostbuf);
-        
-            // ================== NEW PRINT STATEMENT #1 ==================
-            // Print the raw host buffer immediately after getting it from the tensor.
+            // **FIXED**: Directly access the complete local buffer. Do not use get().
+            Cplx* M2_hostbuf = M2_local.access_local_buf();
+            
+            // **DIAGNOSTIC PRINT #1**: Print the raw buffer to verify its contents.
             std::cout << "[RANK " << rank << "] SVD_DEBUG: M2_hostbuf contents for qubits (" << q0 << ", " << q1 << "):" << std::endl;
-            for(size_t i = 0; i < M2_hostbuf.size(); ++i) {
+            for(size_t i = 0; i < M2_local.size(); ++i) {
                 std::cout << "  [" << i << "]: (" << M2_hostbuf[i].real() << ", " << M2_hostbuf[i].imag() << ")" << std::endl;
             }
-            // ============================================================
-        
+            
+            // Reshaping logic remains the same, but now operates on the complete buffer.
             size_t c = 0;
             for (size_t l = 0; l < Dl; ++l) {
                 for (size_t p0 = 0; p0 < phys_dim; ++p0) {
@@ -1268,10 +1253,8 @@ namespace NWQSim
                 }
             }
         
-            // ================== NEW PRINT STATEMENT #2 ==================
-            // Print the Eigen matrix right before it's passed to the SVD algorithm.
+            // **DIAGNOSTIC PRINT #2**: Print the Eigen matrix before SVD.
             std::cout << "[RANK " << rank << "] SVD_DEBUG: Eigen matrix 'mat' before SVD for qubits (" << q0 << ", " << q1 << "):" << std::endl << mat << std::endl;
-            // ============================================================
             
             // 3. Compute the SVD using Eigen's robust BDCSVD.
             Eigen::BDCSVD<decltype(mat)> svd(mat, Eigen::ComputeThinU | Eigen::ComputeThinV);
