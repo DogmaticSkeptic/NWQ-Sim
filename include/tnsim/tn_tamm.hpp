@@ -1049,7 +1049,7 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] <-- C1_GATE_local_kernel on qubit " << q_idx << " finished." << std::endl;
         }
 
-        LocalGateResult C2_GATE_COMPUTE(const std::array<CplL_TYPE_> &U4, IdxType q0, IdxType q1)
+        LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
             int rank = pg.rank().value();
         
@@ -1133,8 +1133,9 @@ namespace NWQSim
             
             //------------------------------------------------------------------
             // THE FIX:
-            // Create the full buffer on the host first, then perform ONE single,
-            // atomic put() call. This avoids the bug in the tiled put() loop.
+            // Create the full 16-element buffer on the host first, then perform ONE 
+            // single, atomic put() call for the entire tensor. This avoids the bug
+            // in the fine-grained, tiled put() loop.
             //------------------------------------------------------------------
             std::vector<Cplx> g4_full_buf(G4_local.size());
             size_t c = 0;
@@ -1149,6 +1150,7 @@ namespace NWQSim
                     }
                 }
             }
+            // This single put call is the robust solution.
             G4_local.put(*(G4_local.loop_nest().begin()), g4_full_buf);
             //------------------------------------------------------------------
         
