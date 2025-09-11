@@ -15,9 +15,9 @@ using Tensor = tamm::Tensor<Cplx>;
  */
 void print_4d_tensor_data(Tensor& t, const std::string& name) {
     // This function assumes it is only ever called by rank 0 on a local tensor.
-    std::vector<Cplx> buf(t.size());
-    // For a single-block tensor, getting the first block gets the whole tensor.
-    t.get(*(t.loop_nest().begin()), buf);
+    // **FIXED**: Access the entire local buffer directly.
+    Cplx* buf = t.access_local_buf();
+    size_t num_elements = t.size();
 
     auto dims = t.tiled_index_spaces();
     size_t d1 = dims[0].index_space().num_indices();
@@ -29,7 +29,7 @@ void print_4d_tensor_data(Tensor& t, const std::string& name) {
               << d1 << "x" << d2 << "x" << d3 << "x" << d4 << ") ---" << std::endl;
 
     std::cout << "[ ";
-    for (size_t i = 0; i < buf.size(); ++i) {
+    for (size_t i = 0; i < num_elements; ++i) {
         // Print small numbers as zero for clarity
         double real_part = std::abs(buf[i].real()) < 1e-9 ? 0.0 : buf[i].real();
         double imag_part = std::abs(buf[i].imag()) < 1e-9 ? 0.0 : buf[i].imag();
@@ -38,6 +38,7 @@ void print_4d_tensor_data(Tensor& t, const std::string& name) {
     std::cout << "]" << std::endl;
     std::cout << "---------------------------------------------------------" << std::endl;
 }
+
 
 int main(int argc, char* argv[]) {
     tamm::initialize(argc, argv);
@@ -73,22 +74,12 @@ int main(int argc, char* argv[]) {
             Cplx(-0.441,-0.147), Cplx( 0.181,-0.387), Cplx(-0.391, 0.458), Cplx(-0.236,-0.428)
         };
         
-        sch_local(G4_local() = 0.0).execute(); // Zero out first to be safe
-        
-        // *** FIX: Use tamm::Index for loop variables to match the expected type ***
-        for (tamm::Index p0p = 0; p0p < 2; ++p0p) {
-            for (tamm::Index p1p = 0; p1p < 2; ++p1p) {
-                for (tamm::Index p0_in = 0; p0_in < 2; ++p0_in) {
-                    for (tamm::Index p1_in = 0; p1_in < 2; ++p1_in) {
-                        size_t row = p0p * 2 + p1p;
-                        size_t col = p0_in * 2 + p1_in;
-                        G4_local.put({p0p, p1p, p0_in, p1_in}, {&U4[row * 4 + col], 1});
-                    }
-                }
-            }
+        // **FIXED**: Populate G4_local by directly accessing its buffer.
+        Cplx* g4_buf = G4_local.access_local_buf();
+        for (size_t i = 0; i < 16; ++i) {
+            g4_buf[i] = U4[i];
         }
 
-        // Populate M_local to represent the |00> state vector [1, 0, 0, 0]
         Cplx one{1.0, 0.0};
         sch_local(M_local() = 0.0).execute(); 
         M_local.put({0,0,0,0}, {&one, 1}); 
