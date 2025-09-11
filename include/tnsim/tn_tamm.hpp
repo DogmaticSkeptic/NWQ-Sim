@@ -1092,20 +1092,33 @@ namespace NWQSim
                 print_local_tensor_data(rank, "Merged Tensor (M_local)", M_local);
             }
             
-            std::vector<Cplx> g4_buf(G4_local.size());
-            size_t c = 0;
-            for (int p0p = 0; p0p < 2; ++p0p) {
-                for (int p1p = 0; p1p < 2; ++p1p) {
-                    for (int p0_in = 0; p0_in < 2; ++p0_in) {
-                        for (int p1_in = 0; p1_in < 2; ++p1_in, ++c) {
-                            int row = p0p * 2 + p1p;
-                            int col = p0_in * 2 + p1_in;
-                            g4_buf[c] = U4[row * 4 + col];
+            //------------------------------------------------------------------
+            // FIXED: Gate construction logic is replaced with the robust method
+            // from the sequential version to ensure correct memory mapping.
+            //------------------------------------------------------------------
+            for (const auto &blockid : G4_local.loop_nest())
+            {
+                size_t bs = G4_local.block_size(blockid);
+                std::vector<Cplx> g4_buf(bs);
+                auto dims = G4_local.block_dims(blockid);
+                auto offs = G4_local.block_offsets(blockid);
+                size_t c = 0;
+                for (size_t p0p = offs[0]; p0p < offs[0] + dims[0]; ++p0p) {
+                    for (size_t p1p = offs[1]; p1p < offs[1] + dims[1]; ++p1p) {
+                        for (size_t p0_in = offs[2]; p0_in < offs[2] + dims[2]; ++p0_in) {
+                            for (size_t p1_in = offs[3]; p1_in < offs[3] + dims[3]; ++p1_in, ++c) {
+                                int row = int(p0p * 2 + p1p);
+                                int col = int(p0_in * 2 + p1_in);
+                                g4_buf[c] = U4[row * 4 + col];
+                            }
                         }
                     }
                 }
+                G4_local.put(blockid, g4_buf);
             }
-            G4_local.put(*(G4_local.loop_nest().begin()), g4_buf);
+            //------------------------------------------------------------------
+            // END OF FIX
+            //------------------------------------------------------------------
         
             // Print the G4_local gate
             if (rank == 0) {
