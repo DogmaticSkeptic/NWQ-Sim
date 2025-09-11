@@ -981,7 +981,7 @@ namespace NWQSim
             
             sch_local_.allocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
         
-            // 2. **FIXED**: Perform a full copy from the distributed tensors to the local tensors.
+            // 2. **FIXED**: Perform a full copy from the distributed tensors to the local tensors using the scheduler.
             auto start_get = std::chrono::high_resolution_clock::now();
             sch_local_
                 (T0_local() = mps_tensors[q0]())
