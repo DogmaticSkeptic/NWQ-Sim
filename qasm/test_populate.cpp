@@ -82,12 +82,29 @@ int main(int argc, char* argv[]) {
             Cplx(-0.359,-0.442), Cplx(-0.556, 0.261), Cplx(-0.052, 0.307), Cplx( 0.398, 0.206),
             Cplx(-0.441,-0.147), Cplx( 0.181,-0.387), Cplx(-0.391, 0.458), Cplx(-0.236,-0.428)
         };
+
+        // CORRECTED LAMBDA: This function is called for each BLOCK. Since the tensor
+        // is not tiled, it has only one block. We must iterate over all elements
+        // within the block's buffer to populate it correctly.
         auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
-            int p0p   = bid[0]; int p1p   = bid[1];
-            int p0_in = bid[2]; int p1_in = bid[3];
-            int row = p0p * 2 + p1p;
-            int col = p0_in * 2 + p1_in;
-            buf[0] = U4[row * 4 + col];
+            auto block_dims = G4_local.block_dims(bid);
+            size_t d1 = block_dims[0];
+            size_t d2 = block_dims[1];
+            size_t d3 = block_dims[2];
+            size_t d4 = block_dims[3];
+
+            size_t c = 0; // Counter for the 1D buffer 'buf'
+            for (size_t p0p = 0; p0p < d1; ++p0p) {
+                for (size_t p1p = 0; p1p < d2; ++p1p) {
+                    for (size_t p0_in = 0; p0_in < d3; ++p0_in) {
+                        for (size_t p1_in = 0; p1_in < d4; ++p1_in) {
+                            size_t row = p0p * 2 + p1p;
+                            size_t col = p0_in * 2 + p1_in;
+                            buf[c++] = U4[row * 4 + col];
+                        }
+                    }
+                }
+            }
         };
         tamm::update_tensor(G4_local, fill_g4);
 
