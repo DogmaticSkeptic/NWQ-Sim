@@ -1005,13 +1005,15 @@ namespace NWQSim
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
         
             // --- Populate the local gate matrix tensor ---
-            auto fill_g = [&](const tamm::IndexVector& blockid, tamm::span<Cplx> buf){
-                auto offsets = G_local.block_offsets(blockid);
-                int pout = offsets[0], pin = offsets[1];
-                buf[0] = U[pout * 2 + pin];
-            };
-            tamm::fill_tensor(G_local, fill_g); // fill_tensor is a utility to populate a tensor with a lambda
-        
+            // **FIXED**: Directly access the buffer instead of using fill_tensor for local tensors.
+            Cplx* g_local_buf = G_local.access_local_buf();
+            for (tamm::Index p_prime = 0; p_prime < 2; ++p_prime) {
+                for (tamm::Index p_in = 0; p_in < 2; ++p_in) {
+                    // The buffer layout is row-major, matching the 2D array U.
+                    g_local_buf[p_prime * 2 + p_in] = U[p_prime * 2 + p_in];
+                }
+            }
+            
             // --- Get data from global tensor into a local TAMM tensor ---
             auto start_get = std::chrono::high_resolution_clock::now();
             std::vector<Cplx> t_in_buf(T_in_local.size());
@@ -1085,15 +1087,17 @@ namespace NWQSim
             total_data_movement_time += (end_get - start_get);
         
             // **DIAGNOSTIC**: Print the gathered input tensors
-            print_local_tensor_data(rank, "T0_local (Input)", T0_local);
-            print_local_tensor_data(rank, "T1_local (Input)", T1_local);
-        
+            if (rank == 0) { // Only print from rank 0
+              print_local_tensor_data(rank, "T0_local (Input)", T0_local);
+              print_local_tensor_data(rank, "T1_local (Input)", T1_local);
+            }
+            
             // 3. Build the two-qubit gate tensor G4_local by accessing its buffer directly.
             Cplx* g4_buf = G4_local.access_local_buf();
             for (size_t i = 0; i < 16; ++i) {
                 g4_buf[i] = U4[i];
             }
-            print_4_index_tensor(G4_local, "G4_local (Gate Matrix)", q0, q1);
+            if(rank == 0) print_4_index_tensor(G4_local, "G4_local (Gate Matrix)", q0, q1);
             
             // 4. Perform the contractions.
             auto start_contraction = std::chrono::high_resolution_clock::now();
@@ -1102,7 +1106,7 @@ namespace NWQSim
                 .execute(exec_hw);
             
             // **DIAGNOSTIC**: Print the merged M tensor
-            print_4_index_tensor(M_local, "M_local (Merged T0*T1)", q0, q1);
+            if(rank == 0) print_4_index_tensor(M_local, "M_local (Merged T0*T1)", q0, q1);
                 
             sch_local_
                 (M2_local("l","p0p","p1p","r") = G4_local("p0p","p1p","p0","p1") * M_local("l","p0","p1","r"))
@@ -1111,7 +1115,7 @@ namespace NWQSim
             total_contraction_time += (end_contraction - start_contraction);
             
             // **DIAGNOSTIC**: Print the final M2 result before SVD
-            print_4_index_tensor(M2_local, "M2_local (Result of G4*M)", q0, q1);
+            if(rank == 0) print_4_index_tensor(M2_local, "M2_local (Result of G4*M)", q0, q1);
         
             // 5. Perform SVD and reconstruct the new tensor data.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
