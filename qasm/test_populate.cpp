@@ -58,7 +58,7 @@ int main(int argc, char* argv[]) {
 
     // Set up a local execution context, which runs on a single process.
     ProcGroup pg_local = ProcGroup::create_self();
-    ExecutionContext ec_local{pg_local, DistributionKind::dense, MemoryManagerKind::local};
+    ExecutionContext ec_local{pg_local, DistributionKind::dense, MemoryManagerKind::ga};
     Scheduler sch_local{ec_local};
 
     // Define the TiledIndexSpace for a qubit (dimension 2, tile size 1).
