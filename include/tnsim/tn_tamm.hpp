@@ -1054,7 +1054,7 @@ namespace NWQSim
             int rank = pg.rank().value();
         
             // --- DIAGNOSTIC PRINT 0: Input U4 Array ---
-            {
+            if (rank == 0) { // Print only from one rank to avoid clutter
                 std::stringstream ss;
                 ss << std::fixed << std::setprecision(3);
                 ss << "[RANK " << rank << "] --- U4 Gate Matrix (Input Array) on Qubits (" << q0 << ", " << q1 << ") ---" << std::endl;
@@ -1083,25 +1083,36 @@ namespace NWQSim
             sch_local_temp.allocate(T0_local, T1_local).execute(exec_hw);
         
             auto start_get = std::chrono::high_resolution_clock::now();
-            std::vector<Cplx> t0_buf(T0_local.size());
-            mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
-            T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
+            
+            // FIX 1: Correctly copy the full distributed tensor to the local tensor.
+            // We must iterate over all blocks of the source tensor.
+            block_for(ec_local, T0_local(), [&](const IndexVector& blockid){
+                std::vector<Cplx> buf(T0_local.block_size(blockid));
+                mps_tensors[q0].get(blockid, buf); // Get from the global/distributed tensor
+                T0_local.put(blockid, buf);        // Put into the corresponding block of the local tensor
+            });
         
-            std::vector<Cplx> t1_buf(T1_local.size());
-            mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
-            T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
+            block_for(ec_local, T1_local(), [&](const IndexVector& blockid){
+                std::vector<Cplx> buf(T1_local.block_size(blockid));
+                mps_tensors[q1].get(blockid, buf); // Get from the global/distributed tensor
+                T1_local.put(blockid, buf);        // Put into the corresponding block of the local tensor
+            });
+        
             auto end_get = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_get - start_get);
         
             // --- DIAGNOSTIC PRINT 1: Input Tensors ---
             {
+                // FIX 2: Correctly print the entire local tensor buffer.
+                const Cplx* t0_buf_ptr = T0_local.access_local_buf();
+                const Cplx* t1_buf_ptr = T1_local.access_local_buf();
                 std::stringstream ss;
                 ss << std::fixed << std::setprecision(3);
                 ss << "[RANK " << rank << "] --- T0_local (Input) ---" << std::endl << "[RANK " << rank << "] [ ";
-                for (const auto& val : t0_buf) { ss << "(" << val.real() << "," << val.imag() << ") "; }
+                for (size_t i = 0; i < T0_local.size(); ++i) { ss << "(" << t0_buf_ptr[i].real() << "," << t0_buf_ptr[i].imag() << ") "; }
                 ss << "]" << std::endl << "[RANK " << rank << "] --- End T0_local (Input) ---" << std::endl;
                 ss << "[RANK " << rank << "] --- T1_local (Input) ---" << std::endl << "[RANK " << rank << "] [ ";
-                for (const auto& val : t1_buf) { ss << "(" << val.real() << "," << val.imag() << ") "; }
+                for (size_t i = 0; i < T1_local.size(); ++i) { ss << "(" << t1_buf_ptr[i].real() << "," << t1_buf_ptr[i].imag() << ") "; }
                 ss << "]" << std::endl << "[RANK " << rank << "] --- End T1_local (Input) ---" << std::endl;
                 std::cout << ss.str(); fflush(stdout);
             }
@@ -1116,50 +1127,45 @@ namespace NWQSim
         
             // --- DIAGNOSTIC PRINT 2: Merged Tensor ---
             {
-                std::vector<Cplx> buf(M_local.size());
-                M_local.get(*(M_local.loop_nest().begin()), buf);
+                // FIX 2: Correctly print the entire local tensor buffer.
+                const Cplx* m_buf_ptr = M_local.access_local_buf();
                 std::stringstream ss;
                 ss << "[RANK " << rank << "] --- Merged Tensor (M_local) ---" << std::endl << "[RANK " << rank << "] [ ";
                 ss << std::fixed << std::setprecision(3);
-                for (const auto& val : buf) { ss << "(" << val.real() << "," << val.imag() << ") "; }
+                for (size_t i = 0; i < M_local.size(); ++i) { ss << "(" << m_buf_ptr[i].real() << "," << m_buf_ptr[i].imag() << ") "; }
                 ss << "]" << std::endl << "[RANK " << rank << "] --- End Merged Tensor (M_local) ---" << std::endl;
                 std::cout << ss.str(); fflush(stdout);
             }
         
             // 3. Build the two-qubit gate tensor G4_local.
+            // Your method of iterating through the loop_nest is correct, especially for
+            // block-distributed tensors. For a fully local, dense tensor, direct buffer access
+            // can also be used, but this is a more general approach.
             tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
             G4_local.set_dense();
             sch_local_temp.allocate(G4_local).execute(exec_hw);
             
-            // CORRECTED AND IDIOMATIC WAY:
-            // Iterate over each block of the local tensor and put the corresponding value.
             for (const auto& blockid : G4_local.loop_nest()) {
-                // For a tile size of 1, the blockid is the same as the absolute index.
-                // blockid is an IndexVector {p0_prime, p1_prime, p0_in, p1_in}
                 IdxType p0_prime = blockid[0];
                 IdxType p1_prime = blockid[1];
                 IdxType p0_in    = blockid[2];
                 IdxType p1_in    = blockid[3];
             
-                // Calculate row and column for the 4x4 gate matrix U4
                 int row = p0_prime * 2 + p1_prime;
                 int col = p0_in * 2 + p1_in;
             
-                // Create a buffer for the single complex value of this block
                 Cplx value = U4[row * 4 + col];
-                
-                // Put this single value into the correct block
-                G4_local.put(blockid, {&value, 1});
+                G4_local.put(blockid, {&value, 1}); // Correctly puts a single value into its block.
             } 
-
+        
             // --- DIAGNOSTIC PRINT 3: Gate Tensor ---
             {
-                std::vector<Cplx> buf(G4_local.size());
-                G4_local.get(*(G4_local.loop_nest().begin()), buf);
+                // FIX 2: Correctly print the entire local tensor buffer.
+                const Cplx* g4_buf_ptr = G4_local.access_local_buf();
                 std::stringstream ss;
                 ss << "[RANK " << rank << "] --- G4_local Gate ---" << std::endl << "[RANK " << rank << "] [ ";
                 ss << std::fixed << std::setprecision(3);
-                for (const auto& val : buf) { ss << "(" << val.real() << "," << val.imag() << ") "; }
+                for (size_t i = 0; i < G4_local.size(); ++i) { ss << "(" << g4_buf_ptr[i].real() << "," << g4_buf_ptr[i].imag() << ") "; }
                 ss << "]" << std::endl << "[RANK " << rank << "] --- End G4_local Gate ---" << std::endl;
                 std::cout << ss.str(); fflush(stdout);
             }
@@ -1174,12 +1180,12 @@ namespace NWQSim
         
             // --- DIAGNOSTIC PRINT 4: Result Tensor ---
             {
-                std::vector<Cplx> buf(M2_local.size());
-                M2_local.get(*(M2_local.loop_nest().begin()), buf);
+                // FIX 2: Correctly print the entire local tensor buffer.
+                const Cplx* m2_buf_ptr = M2_local.access_local_buf();
                 std::stringstream ss;
                 ss << "[RANK " << rank << "] --- Result after Gate Application (M2_local) ---" << std::endl << "[RANK " << rank << "] [ ";
                 ss << std::fixed << std::setprecision(3);
-                for (const auto& val : buf) { ss << "(" << val.real() << "," << val.imag() << ") "; }
+                for (size_t i = 0; i < M2_local.size(); ++i) { ss << "(" << m2_buf_ptr[i].real() << "," << m2_buf_ptr[i].imag() << ") "; }
                 ss << "]" << std::endl << "[RANK " << rank << "] --- End Result after Gate Application (M2_local) ---" << std::endl;
                 std::cout << ss.str(); fflush(stdout);
             }
@@ -1189,19 +1195,19 @@ namespace NWQSim
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
             
             // --- DIAGNOSTIC PRINT 5: SVD Results ---
-            {
+            if (rank == 0) {
                 std::stringstream ss_svd;
-                ss_svd << "[RANK " << rank << "] --- Result after SVD ---" << std::endl;
+                ss_svd << "--- Result after SVD ---" << std::endl;
                 ss_svd << std::fixed << std::setprecision(3);
-                ss_svd << "[RANK " << rank << "] New T0 data: [ ";
+                ss_svd << "New T0 data: [ ";
                 for(const auto& val : Ti_new_data) { ss_svd << "(" << val.real() << "," << val.imag() << ") "; }
                 ss_svd << "]" << std::endl;
-                ss_svd << "[RANK " << rank << "] New T1 data: [ ";
+                ss_svd << "New T1 data: [ ";
                 for(const auto& val : Tj_new_data) { ss_svd << "(" << val.real() << "," << val.imag() << ") "; }
-                ss_svd << "]" << std::endl << "[RANK " << rank << "] --- End SVD Result ---" << std::endl;
+                ss_svd << "]" << std::endl << "--- End SVD Result ---" << std::endl;
                 std::cout << ss_svd.str(); fflush(stdout);
             }
-        
+            
             // 6. Clean up all temporary local resources.
             sch_local_temp.deallocate(T0_local, T1_local, M_local, G4_local, M2_local).execute(exec_hw);
             self_pg.destroy_coll();
