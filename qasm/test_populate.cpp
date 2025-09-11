@@ -5,87 +5,119 @@
 #include <iomanip>
 #include <array>
 
-using namespace tamm;
-
-using IdxType = size_t;
+// Use shorter aliases for convenience
 using Cplx = std::complex<double>;
+using Tensor = tamm::Tensor<Cplx>;
 
-void print_4d_tensor(Tensor<Cplx>& t, const std::string& name) {
-    // This function should only be called from rank 0 on a local tensor
-    if (t.execution_context()->pg().rank() != 0) return;
+/**
+ * @brief Prints the contents of a 4-dimensional local TAMM tensor.
+ * 
+ * @param t The tensor to print.
+ * @param name A descriptive name for the tensor.
+ * @param ec The execution context, used to get rank information.
+ */
+void print_4d_tensor_data(Tensor& t, const std::string& name, tamm::ExecutionContext& ec) {
+    // This function will only print from the root process of the tensor's ProcGroup.
+    if (ec.pg().rank() != 0) return;
 
-    std::cout << "\n--- Contents of Tensor: " << name << " ---" << std::endl;
-    
-    // Access the buffer directly, just like during population
-    const Cplx* buf_ptr = t.access_local_buf();
+    std::vector<Cplx> buf(t.size());
+    t.get(*(t.loop_nest().begin()), buf);
 
     auto dims = t.tiled_index_spaces();
-    IdxType d1 = dims[0].index_space().num_indices();
-    IdxType d2 = dims[1].index_space().num_indices();
-    IdxType d3 = dims[2].index_space().num_indices();
-    IdxType d4 = dims[3].index_space().num_indices();
+    size_t d1 = dims[0].index_space().num_indices();
+    size_t d2 = dims[1].index_space().num_indices();
+    size_t d3 = dims[2].index_space().num_indices();
+    size_t d4 = dims[3].index_space().num_indices();
+    
+    std::cout << "\n--- Contents of Tensor: " << name << " ("
+              << d1 << "x" << d2 << "x" << d3 << "x" << d4 << ") ---" << std::endl;
 
-    size_t c = 0;
-    // The tensor data is in row-major (Fortran-style) layout.
-    // The last index is the fastest moving.
-    for (int i = 0; i < d1; ++i) {
-        for (int j = 0; j < d2; ++j) {
-            std::cout << "[ ";
-            for (int k = 0; k < d3; ++k) {
-                for (int l = 0; l < d4; ++l, ++c) {
-                    std::cout << std::fixed << std::setprecision(1) << std::setw(8) << buf_ptr[c] << " ";
-                }
-            }
-            std::cout << "]" << std::endl;
-        }
+    std::cout << "[ ";
+    for (size_t i = 0; i < buf.size(); ++i) {
+        // Print small numbers as zero for clarity
+        double real_part = std::abs(buf[i].real()) < 1e-9 ? 0.0 : buf[i].real();
+        double imag_part = std::abs(buf[i].imag()) < 1e-9 ? 0.0 : buf[i].imag();
+        std::cout << "(" << std::fixed << std::setprecision(3) << real_part << "," << imag_part << ") ";
     }
-    std::cout << "------------------------------------------" << std::endl;
+    std::cout << "]" << std::endl;
+    std::cout << "---------------------------------------------------------" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
     tamm::initialize(argc, argv);
 
-    // Use a self ProcGroup and local memory for a non-distributed tensor
-    ProcGroup pg_local = ProcGroup::create_self();
-    ExecutionContext ec_local{pg_local, DistributionKind::dense, MemoryManagerKind::local};
-    Scheduler sch_local{ec_local};
+    // 1. Set up a local execution context, exactly like in the parallel code's kernel
+    tamm::ProcGroup pg_local = tamm::ProcGroup::create_self();
+    tamm::ExecutionContext ec_local{pg_local, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
+    tamm::Scheduler sch_local{ec_local};
 
     if (ec_local.pg().rank() == 0) {
-        std::cout << ">>> Populating a 2x2x2x2 local dense tensor..." << std::endl;
+        std::cout << ">>> Standalone TAMM Contraction Test <<<" << std::endl;
+        std::cout << ">>> Replicating the M2 = G4 * M calculation." << std::endl;
     }
+
+    // 2. Define the TiledIndexSpaces needed for the tensors
+    tamm::TiledIndexSpace l_tis{tamm::IndexSpace{tamm::range(1)}}; // Left bond dim
+    tamm::TiledIndexSpace r_tis{tamm::IndexSpace{tamm::range(1)}}; // Right bond dim
+    tamm::TiledIndexSpace p_tis{tamm::IndexSpace{tamm::range(2)}}; // Physical dim (qubit)
+
+    // 3. Create and allocate the three tensors
+    Tensor G4_local({p_tis, p_tis, p_tis, p_tis});
+    Tensor M_local({l_tis, p_tis, p_tis, r_tis});
+    Tensor M2_local_result({l_tis, p_tis, p_tis, r_tis});
+
+    sch_local.allocate(G4_local, M_local, M2_local_result).execute();
+
+    // 4. Populate the input tensors
     
-    // Each dimension is size 2, with a single tile of size 2
-    TiledIndexSpace phys_tis{IndexSpace{range(2)}, 2};
-
-    Tensor<Cplx> G4_local({phys_tis, phys_tis, phys_tis, phys_tis});
-    G4_local.set_dense();
-    sch_local.allocate(G4_local).execute();
-
-    std::array<Cplx, 16> U4;
-    for (int i = 0; i < 16; ++i) {
-        U4[i] = Cplx(i + 1.0, 0.0);
+    // Populate G4_local with the exact gate matrix from the failed run
+    if (ec_local.pg().rank() == 0) {
+        std::array<Cplx, 16> U4 = {
+            Cplx(-0.308, 0.204), Cplx(-0.051, 0.398), Cplx(-0.562,-0.253), Cplx(-0.444, 0.354),
+            Cplx( 0.176,-0.540), Cplx( 0.340, 0.404), Cplx( 0.274, 0.293), Cplx(-0.475, 0.108),
+            Cplx(-0.359,-0.442), Cplx(-0.556, 0.261), Cplx(-0.052, 0.307), Cplx( 0.398, 0.206),
+            Cplx(-0.441,-0.147), Cplx( 0.181,-0.387), Cplx(-0.391, 0.458), Cplx(-0.236,-0.428)
+        };
+        // Use a lambda to fill the tensor based on its indices
+        auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
+            int p0p   = bid[0]; int p1p   = bid[1];
+            int p0_in = bid[2]; int p1_in = bid[3];
+            int row = p0p * 2 + p1p;
+            int col = p0_in * 2 + p1_in;
+            buf[0] = U4[row * 4 + col];
+        };
+        tamm::update_tensor(G4_local, fill_g4);
     }
 
-    Cplx* g4_buffer_ptr = G4_local.access_local_buf();
-
-    // TAMM stores dense tensors in a column-major (Fortran-style) layout.
-    // The first index is the fastest-moving.
-    size_t c = 0;
-    for (int p1_in = 0; p1_in < 2; ++p1_in) {
-        for (int p0_in = 0; p0_in < 2; ++p0_in) {
-            for (int p1p = 0; p1p < 2; ++p1p) {
-                for (int p0p = 0; p0p < 2; ++p0p, ++c) {
-                    int row = p0p * 2 + p1p;
-                    int col = p0_in * 2 + p1_in;
-                    g4_buffer_ptr[c] = U4[row * 4 + col];
-                }
-            }
-        }
+    // Populate M_local to represent the |00> state vector [1, 0, 0, 0]
+    // It has only one non-zero element at index (l=0, p0=0, p1=0, r=0)
+    if (ec_local.pg().rank() == 0) {
+        Cplx one{1.0, 0.0};
+        M_local.put({0,0,0,0}, {&one, 1});
     }
 
-    print_4d_tensor(G4_local, "G4_local");
-    
-    sch_local.deallocate(G4_local).execute();
+    // Print the inputs to verify they are correct before the contraction
+    print_4d_tensor_data(G4_local, "G4_local (Input Gate)", ec_local);
+    print_4d_tensor_data(M_local, "M_local (Input State)", ec_local);
+
+    // 5. Perform the problematic contraction
+    if (ec_local.pg().rank() == 0) {
+        std::cout << "\n>>> Performing contraction: M2(l,p0',p1',r) = G4(p0',p1',p0,p1) * M(l,p0,p1,r)\n";
+    }
+    sch_local(M2_local_result("l", "p0p", "p1p", "r") = G4_local("p0p", "p1p", "p0", "p1") * M_local("l", "p0", "p1", "r")).execute();
+
+    // 6. Print the final result tensor. This is the moment of truth.
+    print_4d_tensor_data(M2_local_result, "M2_local_result (Actual Output)", ec_local);
+
+    // 7. For comparison, manually calculate and print the expected correct result
+    if (ec_local.pg().rank() == 0) {
+        std::cout << "\n--- For Reference: Expected Correct Output ---" << std::endl;
+        std::cout << "[ (-0.308,0.204) (0.176,-0.540) (-0.359,-0.442) (-0.441,-0.147) ]" << std::endl;
+        std::cout << "---------------------------------------------------------" << std::endl;
+    }
+
+    // 8. Clean up
+    sch_local.deallocate(G4_local, M_local, M2_local_result).execute();
     pg_local.destroy_coll();
 
     tamm::finalize();
