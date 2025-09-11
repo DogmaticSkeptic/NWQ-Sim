@@ -73,15 +73,16 @@ int main(int argc, char* argv[]) {
             Cplx(-0.441,-0.147), Cplx( 0.181,-0.387), Cplx(-0.391, 0.458), Cplx(-0.236,-0.428)
         };
         
-        // ** THE FIX: Since p_tis is tiled by 1, we must iterate and put each element
-        // ** into its own block.
         sch_local(G4_local() = 0.0).execute(); // Zero out first to be safe
-        size_t c = 0;
-        for (size_t p0p = 0; p0p < 2; ++p0p) {
-            for (size_t p1p = 0; p1p < 2; ++p1p) {
-                for (size_t p0_in = 0; p0_in < 2; ++p0_in) {
-                    for (size_t p1_in = 0; p1_in < 2; ++p1_in) {
-                        G4_local.put({p0p, p1p, p0_in, p1_in}, {&U4[c++], 1});
+        
+        // *** FIX: Use tamm::Index for loop variables to match the expected type ***
+        for (tamm::Index p0p = 0; p0p < 2; ++p0p) {
+            for (tamm::Index p1p = 0; p1p < 2; ++p1p) {
+                for (tamm::Index p0_in = 0; p0_in < 2; ++p0_in) {
+                    for (tamm::Index p1_in = 0; p1_in < 2; ++p1_in) {
+                        size_t row = p0p * 2 + p1p;
+                        size_t col = p0_in * 2 + p1_in;
+                        G4_local.put({p0p, p1p, p0_in, p1_in}, {&U4[row * 4 + col], 1});
                     }
                 }
             }
