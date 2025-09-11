@@ -1084,18 +1084,18 @@ namespace NWQSim
         
             auto start_get = std::chrono::high_resolution_clock::now();
             
-            // FIX 1: Correctly copy the full distributed tensor to the local tensor.
-            // We must iterate over all blocks of the source tensor.
-            block_for(ec_local, T0_local(), [&](const IndexVector& blockid){
+            // CORRECTED: Explicitly use the tamm:: namespace for IndexVector
+            block_for(ec_local, T0_local(), [&](const tamm::IndexVector& blockid){
                 std::vector<Cplx> buf(T0_local.block_size(blockid));
-                mps_tensors[q0].get(blockid, buf); // Get from the global/distributed tensor
-                T0_local.put(blockid, buf);        // Put into the corresponding block of the local tensor
+                mps_tensors[q0].get(blockid, buf); 
+                T0_local.put(blockid, buf);
             });
         
-            block_for(ec_local, T1_local(), [&](const IndexVector& blockid){
+            // CORRECTED: Explicitly use the tamm:: namespace for IndexVector
+            block_for(ec_local, T1_local(), [&](const tamm::IndexVector& blockid){
                 std::vector<Cplx> buf(T1_local.block_size(blockid));
-                mps_tensors[q1].get(blockid, buf); // Get from the global/distributed tensor
-                T1_local.put(blockid, buf);        // Put into the corresponding block of the local tensor
+                mps_tensors[q1].get(blockid, buf); 
+                T1_local.put(blockid, buf);
             });
         
             auto end_get = std::chrono::high_resolution_clock::now();
@@ -1103,7 +1103,6 @@ namespace NWQSim
         
             // --- DIAGNOSTIC PRINT 1: Input Tensors ---
             {
-                // FIX 2: Correctly print the entire local tensor buffer.
                 const Cplx* t0_buf_ptr = T0_local.access_local_buf();
                 const Cplx* t1_buf_ptr = T1_local.access_local_buf();
                 std::stringstream ss;
@@ -1127,7 +1126,6 @@ namespace NWQSim
         
             // --- DIAGNOSTIC PRINT 2: Merged Tensor ---
             {
-                // FIX 2: Correctly print the entire local tensor buffer.
                 const Cplx* m_buf_ptr = M_local.access_local_buf();
                 std::stringstream ss;
                 ss << "[RANK " << rank << "] --- Merged Tensor (M_local) ---" << std::endl << "[RANK " << rank << "] [ ";
@@ -1138,9 +1136,6 @@ namespace NWQSim
             }
         
             // 3. Build the two-qubit gate tensor G4_local.
-            // Your method of iterating through the loop_nest is correct, especially for
-            // block-distributed tensors. For a fully local, dense tensor, direct buffer access
-            // can also be used, but this is a more general approach.
             tamm::Tensor<Cplx> G4_local({phys_tis[q0], phys_tis[q1], phys_tis[q0], phys_tis[q1]});
             G4_local.set_dense();
             sch_local_temp.allocate(G4_local).execute(exec_hw);
@@ -1155,12 +1150,11 @@ namespace NWQSim
                 int col = p0_in * 2 + p1_in;
             
                 Cplx value = U4[row * 4 + col];
-                G4_local.put(blockid, {&value, 1}); // Correctly puts a single value into its block.
+                G4_local.put(blockid, {&value, 1});
             } 
         
             // --- DIAGNOSTIC PRINT 3: Gate Tensor ---
             {
-                // FIX 2: Correctly print the entire local tensor buffer.
                 const Cplx* g4_buf_ptr = G4_local.access_local_buf();
                 std::stringstream ss;
                 ss << "[RANK " << rank << "] --- G4_local Gate ---" << std::endl << "[RANK " << rank << "] [ ";
@@ -1180,7 +1174,6 @@ namespace NWQSim
         
             // --- DIAGNOSTIC PRINT 4: Result Tensor ---
             {
-                // FIX 2: Correctly print the entire local tensor buffer.
                 const Cplx* m2_buf_ptr = M2_local.access_local_buf();
                 std::stringstream ss;
                 ss << "[RANK " << rank << "] --- Result after Gate Application (M2_local) ---" << std::endl << "[RANK " << rank << "] [ ";
