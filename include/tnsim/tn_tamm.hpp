@@ -1043,56 +1043,52 @@ namespace NWQSim
             IdxType Dr = bond_dims[q1 + 1];
             const IdxType Dp = 2;
         
-            // 2. Create fully LOCAL TiledIndexSpaces for the computation.
-            tamm::TiledIndexSpace tis_l_local{tamm::IndexSpace{tamm::range(Dl)}};
-            tamm::TiledIndexSpace tis_p0_local{tamm::IndexSpace{tamm::range(Dp)}};
-            tamm::TiledIndexSpace tis_b_local{tamm::IndexSpace{tamm::range(D_mid)}};
-            tamm::TiledIndexSpace tis_p1_local{tamm::IndexSpace{tamm::range(Dp)}};
-            tamm::TiledIndexSpace tis_r_local{tamm::IndexSpace{tamm::range(Dr)}};
-        
-            // 3. Create local tensors for inputs and the first intermediate (M).
-            tamm::Tensor<Cplx> T0_local({tis_l_local, tis_p0_local, tis_b_local});
-            tamm::Tensor<Cplx> T1_local({tis_b_local, tis_p1_local, tis_r_local});
-            tamm::Tensor<Cplx> M_local({tis_l_local, tis_p0_local, tis_p1_local, tis_r_local});
-            T0_local.set_dense(); T1_local.set_dense(); M_local.set_dense();
-            sch_local_.allocate(T0_local, T1_local, M_local).execute(exec_hw);
-        
-            // 4. GET data from global tensors into local host buffers.
-            std::vector<Cplx> t0_buf(T0_local.size());
+            // 2. GET the input tensor data directly from the global tensors into host buffers.
+            // We don't need intermediate local TAMM tensors for the inputs anymore.
+            std::vector<Cplx> t0_buf(Dl * Dp * D_mid);
             mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
-            T0_local.put(*(T0_local.loop_nest().begin()), t0_buf);
         
-            std::vector<Cplx> t1_buf(T1_local.size());
+            std::vector<Cplx> t1_buf(D_mid * Dp * Dr);
             mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
-            T1_local.put(*(T1_local.loop_nest().begin()), t1_buf);
         
-            // 5. Perform the first contraction to merge T0 and T1 into M. This one works correctly.
-            sch_local_(M_local("l","p0","p1","r") = T0_local("l","p0","b") * T1_local("b","p1","r")).execute(exec_hw);
+            // --- START: FULLY MANUAL CONTRACTION FIX ---
         
-            // --- START: MANUAL CONTRACTION FIX ---
-            // 6. Get the merged tensor M and the gate U4 into host buffers.
-            std::vector<Cplx> M_hostbuf(M_local.size());
-            M_local.get(*(M_local.loop_nest().begin()), M_hostbuf);
+            // 3. Manually compute the FIRST contraction: M = T0 * T1
+            std::vector<Cplx> M_hostbuf(Dl * Dp * Dp * Dr, {0.0, 0.0});
+            for (size_t l = 0; l < Dl; ++l) {
+                for (size_t p0 = 0; p0 < Dp; ++p0) {
+                    for (size_t p1 = 0; p1 < Dp; ++p1) {
+                        for (size_t r = 0; r < Dr; ++r) {
+                            Cplx val = {0.0, 0.0};
+                            // Contract over the middle bond 'b'
+                            for (size_t b = 0; b < D_mid; ++b) {
+                                // Index for T0(l, p0, b)
+                                size_t t0_idx = (l * Dp * D_mid) + (p0 * D_mid) + b;
+                                // Index for T1(b, p1, r)
+                                size_t t1_idx = (b * Dp * Dr) + (p1 * Dr) + r;
+                                val += t0_buf[t0_idx] * t1_buf[t1_idx];
+                            }
+                            // Index for M(l, p0, p1, r)
+                            size_t m_idx = (l * Dp * Dp * Dr) + (p0 * Dp * Dr) + (p1 * Dr) + r;
+                            M_hostbuf[m_idx] = val;
+                        }
+                    }
+                }
+            }
         
-            // 7. Manually compute the second contraction: M2 = G4 * M.
-            // This bypasses the faulty local scheduler behavior.
-            std::vector<Cplx> M2_hostbuf(M_local.size(), {0.0, 0.0});
+            // 4. Manually compute the SECOND contraction: M2 = G4 * M
+            std::vector<Cplx> M2_hostbuf(M_hostbuf.size(), {0.0, 0.0});
             for(size_t l = 0; l < Dl; ++l) {
                 for(size_t r = 0; r < Dr; ++r) {
-                    // For each (l,r) pair, perform a 4x4 mat-vec product.
-                    // The "vector" is the slice M(l,:,:,r)
-                    // The "matrix" is U4
-                    for(int p_out = 0; p_out < 4; ++p_out) { // p_out = p0p * 2 + p1p
+                    // For each (l,r) pair, perform a 4x4 matrix-vector product.
+                    for(int p_out = 0; p_out < 4; ++p_out) { // p_out = p0' * 2 + p1'
                         Cplx val = {0.0, 0.0};
                         for(int p_in = 0; p_in < 4; ++p_in) { // p_in = p0 * 2 + p1
-                            // Index for U4 is straightforward
                             const Cplx& gate_val = U4[p_out * 4 + p_in];
         
-                            // Index for M_hostbuf and M2_hostbuf is (l, p0, p1, r)
                             int p0 = p_in / 2;
                             int p1 = p_in % 2;
                             size_t m_idx = (l * Dp * Dp * Dr) + (p0 * Dp * Dr) + (p1 * Dr) + r;
-        
                             val += gate_val * M_hostbuf[m_idx];
                         }
                         int p0p = p_out / 2;
@@ -1103,18 +1099,23 @@ namespace NWQSim
                 }
             }
         
-            // 8. Create the final local tensor M2_local and put the manually computed data into it.
+            // 5. Create a final local tensor M2_local just to pass the data to the SVD function.
+            tamm::TiledIndexSpace tis_l_local{tamm::IndexSpace{tamm::range(Dl)}};
+            tamm::TiledIndexSpace tis_p0_local{tamm::IndexSpace{tamm::range(Dp)}};
+            tamm::TiledIndexSpace tis_p1_local{tamm::IndexSpace{tamm::range(Dp)}};
+            tamm::TiledIndexSpace tis_r_local{tamm::IndexSpace{tamm::range(Dr)}};
             tamm::Tensor<Cplx> M2_local({tis_l_local, tis_p0_local, tis_p1_local, tis_r_local});
             M2_local.set_dense();
             sch_local_.allocate(M2_local).execute(exec_hw);
             M2_local.put(*(M2_local.loop_nest().begin()), M2_hostbuf);
-            // --- END: MANUAL CONTRACTION FIX ---
         
-            // 9. Perform SVD on the now-correct local M2_local tensor.
+            // --- END: FULLY MANUAL CONTRACTION FIX ---
+        
+            // 6. Perform SVD on the now-correct M2_local tensor.
             std::vector<Cplx> Ti_new_data, Tj_new_data;
             IdxType new_bond_dim = local_svd_and_reconstruct_data(M2_local, Ti_new_data, Tj_new_data, q0, q1);
         
-            // 10. Package the results for the collective update.
+            // 7. Package the results for the collective update.
             LocalGateResult result;
             result.is_valid = true;
             result.q0 = q0;
@@ -1124,8 +1125,8 @@ namespace NWQSim
             result.new_T1_data = std::move(Tj_new_data);
             result.original_rank = rank;
         
-            // 11. Clean up all temporary local tensors.
-            sch_local_.deallocate(T0_local, T1_local, M_local, M2_local).execute(exec_hw);
+            // 8. Clean up the single temporary tensor.
+            sch_local_.deallocate(M2_local).execute(exec_hw);
         
             return result;
         }
