@@ -1093,16 +1093,27 @@ namespace NWQSim
             }
             
             //------------------------------------------------------------------
-            // FIXED: Gate construction logic is replaced with the robust
-            // tamm::update_tensor function to guarantee correct memory mapping.
+            // FIXED: The lambda now has the correct (blockid, buffer) signature
+            // that tamm::update_tensor expects, resolving the compile error.
+            // This is the idiomatic way to fill a tensor block-wise.
             //------------------------------------------------------------------
-            auto fill_g4 = [&](const tamm::IndexVector& iv) {
-                // iv contains the indices for the current element: {p0p, p1p, p0_in, p1_in}
-                int row = iv[0] * 2 + iv[1];
-                int col = iv[2] * 2 + iv[3];
-                return U4[row * 4 + col];
+            auto fill_g4_blockwise = [&](const tamm::IndexVector& blockid, tamm::span<Cplx> buf) {
+                auto dims = G4_local.block_dims(blockid);
+                auto offs = G4_local.block_offsets(blockid);
+                size_t c = 0;
+                for (size_t p0p = offs[0]; p0p < offs[0] + dims[0]; ++p0p) {
+                    for (size_t p1p = offs[1]; p1p < offs[1] + dims[1]; ++p1p) {
+                        for (size_t p0_in = offs[2]; p0_in < offs[2] + dims[2]; ++p0_in) {
+                            for (size_t p1_in = offs[3]; p1_in < offs[3] + dims[3]; ++p1_in, ++c) {
+                                int row = int(p0p * 2 + p1p);
+                                int col = int(p0_in * 2 + p1_in);
+                                buf[c] = U4[row * 4 + col];
+                            }
+                        }
+                    }
+                }
             };
-            tamm::update_tensor(G4_local, fill_g4);
+            tamm::update_tensor(G4_local, fill_g4_blockwise);
             //------------------------------------------------------------------
             // END OF FIX
             //------------------------------------------------------------------
