@@ -4,6 +4,7 @@
 #include <complex>
 #include <iomanip>
 #include <array>
+#include <functional> // Required for std::function
 
 // Use shorter aliases for convenience
 using Cplx = std::complex<double>;
@@ -83,7 +84,8 @@ int main(int argc, char* argv[]) {
             Cplx(-0.441,-0.147), Cplx( 0.181,-0.387), Cplx(-0.391, 0.458), Cplx(-0.236,-0.428)
         };
         
-        auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
+        // Define the lambda to populate the G4 tensor block
+        auto fill_g4_lambda = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
             auto block_dims = G4_local.block_dims(bid);
             size_t d1 = block_dims[0];
             size_t d2 = block_dims[1];
@@ -103,8 +105,11 @@ int main(int argc, char* argv[]) {
                 }
             }
         };
-        // Use fill_tensor for initialization instead of update_tensor
-        tamm::fill_tensor(G4_local, fill_g4);
+
+        // *** FIX: Explicitly create a std::function to match the function signature ***
+        std::function<void(const tamm::IndexVector&, tamm::span<Cplx>)> fill_g4_func = fill_g4_lambda;
+        tamm::fill_tensor(G4_local(), fill_g4_func);
+
 
         // Populate M_local to represent the |00> state vector [1, 0, 0, 0]
         Cplx one{1.0, 0.0};
