@@ -82,10 +82,7 @@ int main(int argc, char* argv[]) {
             Cplx(-0.359,-0.442), Cplx(-0.556, 0.261), Cplx(-0.052, 0.307), Cplx( 0.398, 0.206),
             Cplx(-0.441,-0.147), Cplx( 0.181,-0.387), Cplx(-0.391, 0.458), Cplx(-0.236,-0.428)
         };
-
-        // CORRECTED LAMBDA: This function is called for each BLOCK. Since the tensor
-        // is not tiled, it has only one block. We must iterate over all elements
-        // within the block's buffer to populate it correctly.
+        
         auto fill_g4 = [&](const tamm::IndexVector& bid, tamm::span<Cplx> buf){
             auto block_dims = G4_local.block_dims(bid);
             size_t d1 = block_dims[0];
@@ -106,7 +103,8 @@ int main(int argc, char* argv[]) {
                 }
             }
         };
-        tamm::update_tensor(G4_local, fill_g4);
+        // Use fill_tensor for initialization instead of update_tensor
+        tamm::fill_tensor(G4_local, fill_g4);
 
         // Populate M_local to represent the |00> state vector [1, 0, 0, 0]
         Cplx one{1.0, 0.0};
