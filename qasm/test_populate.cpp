@@ -7,6 +7,9 @@
 
 // Use the tamm namespace
 using namespace tamm;
+
+// ADD THIS LINE: Define the missing type alias from your project.
+using IdxType = size_t;
 // Define a type alias for complex double for convenience
 using Cplx = std::complex<double>;
 
