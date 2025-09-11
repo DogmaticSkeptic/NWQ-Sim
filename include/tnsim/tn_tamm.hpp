@@ -554,6 +554,7 @@ namespace NWQSim
          * 5) Reallocate tensors to mps sites*/
         virtual void C2_GATE_L(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
+            // --- Start of Original Function ---
             if (i_proc == 0) {
                 printf("\n<==================== C2_GATE_L on Qubits (%lld, %lld) ====================>\n", q0, q1);
                 printf("Input Gate Matrix (U4):\n");
@@ -563,17 +564,36 @@ namespace NWQSim
                            U4[i*4+2].real(), U4[i*4+2].imag(), U4[i*4+3].real(), U4[i*4+3].imag());
                 }
             }
-
+        
+            // --- [PRINT STATEMENT ADDED] ---
+            // Print T0_local and T1_local before merging
+            if (i_proc == 0) {
+                // Print T0
+                std::vector<Cplx> t0_buf(mps_tensors[q0].size());
+                mps_tensors[q0].get(*(mps_tensors[q0].loop_nest().begin()), t0_buf);
+                printf("--- T0_local (Input Tensor on q=%lld) ---\n[ ", q0);
+                for(const auto& val : t0_buf) { printf("(%.3f,%.3f) ", val.real(), val.imag()); }
+                printf("]\n--- End T0_local ---\n");
+        
+                // Print T1
+                std::vector<Cplx> t1_buf(mps_tensors[q1].size());
+                mps_tensors[q1].get(*(mps_tensors[q1].loop_nest().begin()), t1_buf);
+                printf("--- T1_local (Input Tensor on q=%lld) ---\n[ ", q1);
+                for(const auto& val : t1_buf) { printf("(%.3f,%.3f) ", val.real(), val.imag()); }
+                printf("]\n--- End T1_local ---\n");
+            }
+            // --------------------------------
+        
             // merge tensors at sites q0 and q1
             IdxType Dl = bond_dims[q0];
             IdxType Dr = bond_dims[q1 + 1];
-
+        
             if (i_proc == 0) {
                 printf("\nStep 1: Merging T_%lld and T_%lld\n", q0, q1);
                 printf("  - T_%lld dimensions: [l=%lld, p0=%lld, b=%lld]\n", q0, bond_dims[q0], phys_dims[q0], bond_dims[q0+1]);
                 printf("  - T_%lld dimensions: [b=%lld, p1=%lld, r=%lld]\n", q1, bond_dims[q1], phys_dims[q1], bond_dims[q1+1]);
             }
-
+        
             tamm::Tensor<Cplx> M({bond_tis[q0], phys_tis[q0], phys_tis[q1], bond_tis[q1 + 1]});
             M.set_dense();
             M.allocate(&ec);
@@ -585,7 +605,17 @@ namespace NWQSim
                     "merge_two", exec_hw);
                 sch.execute(exec_hw);
             }
-
+            
+            // --- [PRINT STATEMENT ADDED] ---
+            if (i_proc == 0) {
+                std::vector<Cplx> m_buf(M.size());
+                M.get(*(M.loop_nest().begin()), m_buf);
+                printf("--- Merged Tensor (M) ---\n[ ");
+                for(const auto& val : m_buf) { printf("(%.3f,%.3f) ", val.real(), val.imag()); }
+                printf("]\n--- End Merged Tensor (M) ---\n");
+            }
+            // --------------------------------
+        
             if (i_proc == 0) {
                 printf("  - Merge complete. Merged tensor M dimensions: [l=%lld, p0=%lld, p1=%lld, r=%lld]\n",
                        Dl, phys_dims[q0], phys_dims[q1], Dr);
@@ -619,6 +649,16 @@ namespace NWQSim
                 }
                 G4.put(blockid, hostbuf);
             }
+            
+            // --- [PRINT STATEMENT ADDED] ---
+            if (i_proc == 0) {
+                std::vector<Cplx> g4_buf(G4.size());
+                G4.get(*(G4.loop_nest().begin()), g4_buf);
+                printf("--- G4_local Gate ---\n[ ");
+                for(const auto& val : g4_buf) { printf("(%.3f,%.3f) ", val.real(), val.imag()); }
+                printf("]\n--- End G4_local Gate ---\n");
+            }
+            // --------------------------------
         
             if (i_proc == 0) {
                 printf("\nStep 2: Applying gate G4 to merged tensor M\n");
@@ -640,17 +680,20 @@ namespace NWQSim
             M.deallocate();
             G4.deallocate();
             
+            // --- [PRINT STATEMENT MODIFIED] ---
+            // The original code had a print here, we'll re-label it for clarity.
             if (i_proc == 0) {
                 std::vector<Cplx> M2_hostbuf(M2.size());
                 M2.get(*(M2.loop_nest().begin()), M2_hostbuf);
-                printf("\n[SEQUENTIAL DIAG] M2 tensor for qubits (%lld, %lld) has %zu elements:\n", q0, q1, M2_hostbuf.size());
+                printf("--- Result after Gate Application (M2_local) ---\n[ ");
                 for(size_t i = 0; i < M2_hostbuf.size(); ++i) {
                     printf("(%.3f, %.3f) ", M2_hostbuf[i].real(), M2_hostbuf[i].imag());
                 }
-                printf("\n\n");
+                printf("]\n--- End Result after Gate Application ---\n\n");
             }
+            // --------------------------------
         
-            // form matrix for singular value decomposition
+            // --- ... Rest of the function (SVD part) remains the same ... ---
             Eigen::Index rows = Dl * 2;
             Eigen::Index cols = 2 * Dr;
             if (i_proc == 0) {
@@ -681,9 +724,7 @@ namespace NWQSim
                 }
             }
         
-            // compute truncated singular value decomposition
-            Eigen::BDCSVD<decltype(mat)> svd(mat,
-                Eigen::ComputeThinU | Eigen::ComputeThinV);
+            Eigen::BDCSVD<decltype(mat)> svd(mat, Eigen::ComputeThinU | Eigen::ComputeThinV);
             auto svals = svd.singularValues();
             if (i_proc == 0) {
                 printf("  - SVD computation finished. Found %ld singular values.\n", svals.size());
@@ -691,10 +732,8 @@ namespace NWQSim
             
             std::vector<IdxType> keep;
             keep.reserve(svals.size());
-            for (IdxType i = 0; i < svals.size(); ++i)
-            {
-                if (std::abs(svals(i)) >= sv_cutoff)
-                {
+            for (IdxType i = 0; i < svals.size(); ++i) {
+                if (std::abs(svals(i)) >= sv_cutoff) {
                     keep.push_back(i);
                 }
             }
@@ -702,15 +741,9 @@ namespace NWQSim
             IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep.size()));
             if (i_proc == 0) {
                 printf("\n[SEQUENTIAL SVD DIAG] Qubits (%lld, %lld), chi=%lld\n", q0, q1, chi);
-                
-                // Print singular values
                 printf("  Singular values: ");
-                for (IdxType k = 0; k < chi; ++k) {
-                    printf("%.6f ", std::abs(svals(keep[k])));
-                }
+                for (IdxType k = 0; k < chi; ++k) { printf("%.6f ", std::abs(svals(keep[k]))); }
                 printf("\n");
-            
-                // Extract and print first few elements of Umat and Vh
                 Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat_dbg(mat.rows(), chi);
                 Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Vh_dbg(chi, mat.cols());
                 for (IdxType k = 0; k < chi; ++k) {
@@ -718,24 +751,17 @@ namespace NWQSim
                     Umat_dbg.col(k) = svd.matrixU().col(i);
                     Vh_dbg.row(k)   = svd.matrixV().col(i).adjoint();
                 }
-                
                 printf("  Umat (first 4): ");
-                for(int i=0; i < std::min((long)4, Umat_dbg.size()); ++i) {
-                    printf("(%.3f,%.3f) ", Umat_dbg.data()[i].real(), Umat_dbg.data()[i].imag());
-                }
+                for(int i=0; i < std::min((long)4, Umat_dbg.size()); ++i) { printf("(%.3f,%.3f) ", Umat_dbg.data()[i].real(), Umat_dbg.data()[i].imag()); }
                 printf("\n");
-            
                 printf("  Vh (first 4): ");
-                for(int i=0; i < std::min((long)4, Vh_dbg.size()); ++i) {
-                    printf("(%.3f,%.3f) ", Vh_dbg.data()[i].real(), Vh_dbg.data()[i].imag());
-                }
+                for(int i=0; i < std::min((long)4, Vh_dbg.size()); ++i) { printf("(%.3f,%.3f) ", Vh_dbg.data()[i].real(), Vh_dbg.data()[i].imag()); }
                 printf("\n\n");
             } 
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Umat(mat.rows(), chi);
             Eigen::Matrix<Cplx, Eigen::Dynamic, 1> kept_svals(chi);
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> Vh(chi, mat.cols());
-            for (IdxType k = 0; k < chi; ++k)
-            {
+            for (IdxType k = 0; k < chi; ++k) {
                 IdxType i = keep[k];
                 Umat.col(k)   = svd.matrixU().col(i);
                 kept_svals(k) = svals(i);
@@ -743,37 +769,30 @@ namespace NWQSim
             }
             
             auto Sdiag = kept_svals.asDiagonal();
-
-            // update bond dimension and index space
             bond_dims[q0 + 1] = chi;
             {
                 tamm::IndexSpace is_new{tamm::range(chi)};
                 bond_tis[q0 + 1] = tamm::TiledIndexSpace(is_new, block_size);
             }
-
+        
             if (i_proc == 0) {
                 printf("\nStep 4: Reconstructing new tensors\n");
             }
         
-            // build new left tensor Ti_new
             tamm::Tensor<Cplx> Ti_new({
                 bond_tis[q0], phys_tis[q0], tamm::TiledIndexSpace(tamm::range(chi), block_size)
             });
             Ti_new.set_dense();
             Ti_new.allocate(&ec);
-            for (const auto &blockid : Ti_new.loop_nest())
-            {
+            for (const auto &blockid : Ti_new.loop_nest()) {
                 size_t bs = Ti_new.block_size(blockid);
                 std::vector<Cplx> hostbuf(bs);
                 auto dims = Ti_new.block_dims(blockid);
                 auto offs = Ti_new.block_offsets(blockid);
                 size_t c = 0;
-                for (size_t l = offs[0]; l < offs[0] + dims[0]; ++l)
-                {
-                    for (size_t p0_in = offs[1]; p0_in < offs[1] + dims[1]; ++p0_in)
-                    {
-                        for (size_t b = offs[2]; b < offs[2] + dims[2]; ++b, ++c)
-                        {
+                for (size_t l = offs[0]; l < offs[0] + dims[0]; ++l) {
+                    for (size_t p0_in = offs[1]; p0_in < offs[1] + dims[1]; ++p0_in) {
+                        for (size_t b = offs[2]; b < offs[2] + dims[2]; ++b, ++c) {
                             hostbuf[c] = Umat(l * 2 + p0_in, b);
                         }
                     }
@@ -785,26 +804,21 @@ namespace NWQSim
                        q0, bond_dims[q0], phys_dims[q0], chi);
             }
         
-            // build new right tensor Tj_new
             Eigen::Matrix<Cplx, Eigen::Dynamic, Eigen::Dynamic> SV = Sdiag * Vh;
             tamm::Tensor<Cplx> Tj_new({
                 tamm::TiledIndexSpace(tamm::range(chi), block_size), phys_tis[q1], bond_tis[q1 + 1]
             });
             Tj_new.set_dense();
             Tj_new.allocate(&ec);
-            for (const auto &blockid : Tj_new.loop_nest())
-            {
+            for (const auto &blockid : Tj_new.loop_nest()) {
                 size_t bs = Tj_new.block_size(blockid);
                 std::vector<Cplx> hostbuf(bs);
                 auto dims = Tj_new.block_dims(blockid);
                 auto offs = Tj_new.block_offsets(blockid);
                 size_t c = 0;
-                for (size_t b = offs[0]; b < offs[0] + dims[0]; ++b)
-                {
-                    for (size_t p1_in = offs[1]; p1_in < offs[1] + dims[1]; ++p1_in)
-                    {
-                        for (size_t r = offs[2]; r < offs[2] + dims[2]; ++r, ++c)
-                        {
+                for (size_t b = offs[0]; b < offs[0] + dims[0]; ++b) {
+                    for (size_t p1_in = offs[1]; p1_in < offs[1] + dims[1]; ++p1_in) {
+                        for (size_t r = offs[2]; r < offs[2] + dims[2]; ++r, ++c) {
                             hostbuf[c] = SV(b, p1_in * Dr + r);
                         }
                     }
@@ -816,13 +830,33 @@ namespace NWQSim
                        q1, chi, phys_dims[q1], Dr);
             }
         
-            // replace old tensors and free memory
+            // --- [PRINT STATEMENT ADDED] ---
+            // Print the final resulting tensor data after SVD reconstruction
+            if (i_proc == 0) {
+                printf("\n--- Result after SVD ---\n");
+                // Print New T0 data
+                std::vector<Cplx> ti_new_buf(Ti_new.size());
+                Ti_new.get(*(Ti_new.loop_nest().begin()), ti_new_buf);
+                printf("New T0 data: [ ");
+                for(const auto& val : ti_new_buf) { printf("(%.3f,%.3f) ", val.real(), val.imag()); }
+                printf("]\n");
+        
+                // Print New T1 data
+                std::vector<Cplx> tj_new_buf(Tj_new.size());
+                Tj_new.get(*(Tj_new.loop_nest().begin()), tj_new_buf);
+                printf("New T1 data: [ ");
+                for(const auto& val : tj_new_buf) { printf("(%.3f,%.3f) ", val.real(), val.imag()); }
+                printf("]\n");
+                printf("--- End SVD Result ---\n");
+            }
+            // --------------------------------
+        
             mps_tensors[q0].deallocate();
             mps_tensors[q1].deallocate();
             mps_tensors[q0] = std::move(Ti_new);
             mps_tensors[q1] = std::move(Tj_new);
             M2.deallocate();
-
+        
             if (i_proc == 0) {
                 printf("  - Old tensors replaced. State update is complete.\n");
                 printf("<================== C2_GATE_L on Qubits (%lld, %lld) Finished ==================>\n\n", q0, q1);
