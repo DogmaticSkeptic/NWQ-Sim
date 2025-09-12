@@ -1150,33 +1150,32 @@ namespace NWQSim
             return result;
         }
 
-        // High-performance randomized SVD using the modern CUDA 12.4 API for cusolverDnXgesvdr
-        void gpu_randomized_svd(
-            const Cplx* A_h, int m, int n, int k_rank,
+        // High-performance Jacobi SVD using cusolverDnZgesvdj, with corrected arguments for CUDA 12.4
+        void gpu_svd_jacobi(
+            const Cplx* A_h, int m, int n,
             std::vector<double>& S,
             std::vector<Cplx>& U_row,
             std::vector<Cplx>& VT_row)
         {
-            // --- Configuration for Randomized SVD ---
-            const int64_t lda = m;
-            const int64_t ldu = m;
-            const int64_t ldv = n;
-            const int64_t k = k_rank;
-            const int64_t p = 20; // Oversampling parameter
-            const unsigned long long seed = 12345;
+            // --- Configuration for Jacobi SVD ---
+            const int lda = m;
+            const int ldu = m;
+            // The gesvdj API computes V, not V^T. We will conjugate its transpose later.
+            const int ldv = n;
+            const int k = std::min(m, n);
 
             // --- Device Memory Allocation ---
             cuDoubleComplex* d_A = nullptr;
             double* d_S = nullptr;
             cuDoubleComplex* d_U = nullptr;
-            cuDoubleComplex* d_V = nullptr;
-            void* d_work = nullptr; // workspace is now void*
+            cuDoubleComplex* d_V = nullptr; // Jacobi computes V, not V^T
+            cuDoubleComplex* d_work = nullptr;
             int* d_info = nullptr;
 
             cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * lda * n);
             cudaMalloc((void**)&d_S, sizeof(double) * k);
-            cudaMalloc((void**)&d_U, sizeof(cuDoubleComplex) * ldu * k);
-            cudaMalloc((void**)&d_V, sizeof(cuDoubleComplex) * ldv * k);
+            cudaMalloc((void**)&d_U, sizeof(cuDoubleComplex) * ldu * m);
+            cudaMalloc((void**)&d_V, sizeof(cuDoubleComplex) * ldv * n);
             cudaMalloc((void**)&d_info, sizeof(int));
 
             cudaMemcpyAsync(d_A,
@@ -1185,53 +1184,54 @@ namespace NWQSim
                             cudaMemcpyHostToDevice,
                             cu_ctx_.stream);
 
-            // --- SVD Execution using the MODERN 'gesvdr' API ---
+            // --- SVD Execution using the high-performance 'gesvdj' API ---
+            gesvdjInfo_t job_info = nullptr;
+            cusolverDnCreateGesvdjInfo(&job_info);
+            cusolverDnXgesvdjSetTolerance(job_info, 1e-2);
+            cusolverDnXgesvdjSetMaxSweeps(job_info, 5);
 
-            // 1. Create and set up the parameters object
-            cusolverDnParams_t params = nullptr;
-            cusolverDnCreateParams(&params);
-
-            cusolverDnSetGesvdrParams(
-                params, m, n, k, p, lda, CUDA_C_64F, ldu, CUDA_C_64F, ldv, CUDA_C_64F, seed);
-
-            // 2. Query for workspace size using the params object
-            size_t workspace_bytes = 0;
-            cusolverDnGesvdr_bufferSize(
+            int lwork = 0;
+            // 1. Query for workspace size with corrected arguments
+            cusolverDnZgesvdj_bufferSize(
                 cu_ctx_.solver,
-                params,
-                CUDA_C_64F, // type A
-                d_S, CUDA_R_64F, // type S
-                d_U, CUDA_C_64F, // type U
-                d_V, CUDA_C_64F, // type V
-                &workspace_bytes);
+                CUSOLVER_EIG_MODE_VECTOR,
+                m, n,
+                d_A, lda,
+                d_S,
+                d_U, ldu,
+                d_V, ldv,
+                &lwork,
+                job_info);
 
-            cudaMalloc(&d_work, workspace_bytes);
+            cudaMalloc((void**)&d_work, sizeof(cuDoubleComplex) * lwork);
 
-            // 3. Perform the Randomized SVD using the params object
-            cusolverDnXgesvdr(
+            // 2. Perform the Jacobi SVD with corrected arguments
+            cusolverDnZgesvdj(
                 cu_ctx_.solver,
-                params,
-                d_A, CUDA_C_64F,
-                d_S, CUDA_R_64F,
-                d_U, CUDA_C_64F,
-                d_V, CUDA_C_64F,
-                d_work, workspace_bytes,
-                d_info);
+                CUSOLVER_EIG_MODE_VECTOR,
+                m, n,
+                d_A, lda,
+                d_S,
+                d_U, ldu,
+                d_V, ldv,
+                d_work, lwork,
+                d_info,
+                job_info);
 
             cudaStreamSynchronize(cu_ctx_.stream);
 
             // --- Copy Results from Device to Host ---
             S.resize(k);
-            std::vector<Cplx> U_col(ldu * k);
-            std::vector<Cplx> V_col(ldv * k);
+            std::vector<Cplx> U_col(ldu * m);
+            std::vector<Cplx> V_col(ldv * n);
 
             cudaMemcpy(S.data(), d_S, sizeof(double) * k, cudaMemcpyDeviceToHost);
-            cudaMemcpy(U_col.data(), d_U, sizeof(Cplx) * ldu * k, cudaMemcpyDeviceToHost);
-            cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * ldv * k, cudaMemcpyDeviceToHost);
+            cudaMemcpy(U_col.data(), d_U, sizeof(Cplx) * ldu * m, cudaMemcpyDeviceToHost);
+            cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * ldv * n, cudaMemcpyDeviceToHost);
 
             // --- Post-processing: Transpose and build final matrices ---
             U_row.resize(m * k);
-            for (int i = 0; i < m; ++i) {
+             for (int i = 0; i < m; ++i) {
                 for (int j = 0; j < k; ++j) {
                     U_row[i * k + j] = U_col[j * ldu + i];
                 }
@@ -1240,12 +1240,12 @@ namespace NWQSim
             VT_row.resize(k * n);
             for (int i = 0; i < k; ++i) {
                 for (int j = 0; j < n; ++j) {
-                    VT_row[i * n + j] = std::conj(V_col[j * k + i]);
+                    VT_row[i * n + j] = std::conj(V_col[i * ldv + j]);
                 }
             }
 
             // --- Cleanup ---
-            cusolverDnDestroyParams(params); // Destroy the params object
+            cusolverDnDestroyGesvdjInfo(job_info);
             cudaFree(d_work);
             cudaFree(d_info);
             cudaFree(d_V);
@@ -1287,16 +1287,13 @@ namespace NWQSim
                 }
             }
             
-            // 3. Perform the SVD.
-            // **MODIFIED**: We now decide the target rank 'k' BEFORE the SVD call.
-            int target_rank = std::min({(int)max_bond_dim, m, n});
-            
+            // 3. Perform the SVD using the Jacobi method.
             std::vector<double> S_vals;
             std::vector<Cplx> U_mat_rowmajor, VT_mat_rowmajor;
-            gpu_randomized_svd(M2_col_major.data(), m, n, target_rank, S_vals, U_mat_rowmajor, VT_mat_rowmajor);
+            // This now calls the corrected Jacobi SVD function
+            gpu_svd_jacobi(M2_col_major.data(), m, n, S_vals, U_mat_rowmajor, VT_mat_rowmajor);
         
-            // 4. Truncate based on singular value cutoff.
-            //    (We no longer need to truncate by max_bond_dim, as the SVD already did it).
+            // 4. Truncate based on singular value cutoff and max bond dimension.
             std::vector<IdxType> keep_indices;
             keep_indices.reserve(S_vals.size());
             for (size_t i = 0; i < S_vals.size(); ++i) {
@@ -1304,7 +1301,7 @@ namespace NWQSim
                     keep_indices.push_back(i);
                 }
             }
-            IdxType chi = keep_indices.size();
+            IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep_indices.size()));
             if (chi == 0 && !S_vals.empty()) {
                 chi = 1; // Prevent bond dimension from ever becoming zero.
             }
@@ -1318,8 +1315,6 @@ namespace NWQSim
             }
             
             // 5. Populate the output vectors with the data for the new tensors.
-            
-            // 5a. Populate new left tensor (Ti_new_data) from truncated U.
             Ti_new_data.resize(Dl * phys_dim * chi);
             c = 0;
             for (size_t l = 0; l < Dl; ++l) {
@@ -1332,7 +1327,6 @@ namespace NWQSim
                 }
             }
         
-            // 5b. Populate new right tensor (Tj_new_data) from S * Vh.
             Tj_new_data.resize(chi * phys_dim * Dr);
             c = 0;
             for (size_t b = 0; b < chi; ++b) {
