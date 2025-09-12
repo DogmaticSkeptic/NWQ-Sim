@@ -477,7 +477,7 @@ namespace NWQSim
 //        
 //            std::cout << "[RANK " << pg.rank().value() << "] DIAG " << name << " q=" << q_idx 
 //                      << " | norm=" << std::sqrt(norm_sq) << " | data=[" << ss.str() << "...]" << std::endl;
-//        }
+        }
 //
 //        // In TN_TAMM class
         void print_mps_tensor(IdxType site)
