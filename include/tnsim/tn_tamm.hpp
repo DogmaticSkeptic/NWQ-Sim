@@ -855,6 +855,7 @@ namespace NWQSim
             return all_metadata;
         }
         
+        // In TN_TAMM class
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
@@ -892,10 +893,9 @@ namespace NWQSim
                 bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
             }
             
-            // --- PHASE 2: Create, allocate, and populate new tensors in one go ---
-            std::cout << "[RANK " << rank << "] --- apply_collective_updates: PHASE 2 [Tensor Re-creation and Data Transfer] ---" << std::endl;
+            // --- PHASE 2: Create, deallocate old, and allocate new tensors ---
+            std::cout << "[RANK " << rank << "] --- apply_collective_updates: PHASE 2 [Tensor Re-creation] ---" << std::endl;
             
-            // Create new temporary tensors that will replace the old ones.
             std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
             for(const auto& site : sites_to_update) {
                 site_to_new_tensor.emplace(
@@ -903,11 +903,9 @@ namespace NWQSim
                     tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]}
                 );
                 site_to_new_tensor.at(site).set_dense();
+                sch_global.deallocate(mps_tensors[site]);
+                sch_global.allocate(site_to_new_tensor.at(site));
             }
-            
-            // Deallocate the old tensors and allocate the new ones.
-            for(const auto& site : sites_to_update) sch_global.deallocate(mps_tensors[site]);
-            for(auto& [site, new_tensor] : site_to_new_tensor) sch_global.allocate(new_tensor);
         
             auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             sch_global.execute(exec_hw);
@@ -915,11 +913,10 @@ namespace NWQSim
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
             
             // --- Data Transfer ---
-            // The rank that computed the result now creates a local tensor with the
-            // data and schedules a copy to the newly created global tensor.
             std::cout << "[RANK " << rank << "]   - BARRIER before data puts." << std::endl;
             pg.barrier();
         
+            // **FIXED**: Only the owner rank for each gate result will schedule and execute the copy.
             int local_result_idx = 0;
             for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
@@ -928,7 +925,6 @@ namespace NWQSim
                     auto& result_data = local_results[local_result_idx++];
                     assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
         
-                    // Get references to the newly allocated global tensors
                     auto& new_T0_global = site_to_new_tensor.at(meta.q0);
                     auto& new_T1_global = site_to_new_tensor.at(meta.q1);
                     
@@ -938,14 +934,13 @@ namespace NWQSim
                     new_T0_local.set_dense();
                     new_T1_local.set_dense();
         
-                    // Use the member local scheduler for these local operations
                     sch_local_.allocate(new_T0_local, new_T1_local).execute(exec_hw);
                     
                     // Populate the local tensors from the C++ vectors
                     new_T0_local.put(*(new_T0_local.loop_nest().begin()), result_data.new_T0_data);
                     new_T1_local.put(*(new_T1_local.loop_nest().begin()), result_data.new_T1_data);
                     
-                    // **FIXED**: Schedule a full copy from the local tensor to the global tensor.
+                    // Schedule a full copy from the local tensor to the global tensor.
                     sch_global(new_T0_global() = new_T0_local());
                     sch_global(new_T1_global() = new_T1_local());
         
@@ -954,9 +949,9 @@ namespace NWQSim
                 }
             }
             
-            // Execute all the scheduled copy operations
+            // **FIXED**: All ranks must participate in the execute call for the copies to happen.
             auto start_put = std::chrono::high_resolution_clock::now();
-            sch_global.execute(exec_hw); // **FIXED**
+            sch_global.execute(exec_hw);
             auto end_put = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_put - start_put);
         
