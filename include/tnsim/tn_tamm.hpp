@@ -858,26 +858,21 @@ namespace NWQSim
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with "
-                      << local_results.size() << " local results." << std::endl;
+            if (rank == 0) {
+                std::cout << ">> Entering apply_collective_updates..." << std::endl;
+            }
         
-            // PHASE 1: Gather metadata from all ranks to get a global view of all updates.
+            // PHASE 1: Gather metadata from all ranks.
             auto start_gather = std::chrono::high_resolution_clock::now();
             auto all_metadata = allgather_metadata(local_results);
             auto end_gather = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_gather - start_gather);
         
-            std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: "
-                      << all_metadata.size() << std::endl;
-        
-            // Use a single global scheduler for all collective memory operations.
             tamm::Scheduler sch_global{ec};
         
-            // PHASE 2: Deallocate old tensors and update bond dimension metadata on ALL ranks.
-            // This ensures every process agrees on the new tensor shapes before allocation.
+            // PHASE 2 & 3: All ranks collectively schedule deallocations and allocations.
             std::set<IdxType> deallocated_sites;
-            for (const auto& meta : all_metadata)
-            {
+            for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
         
                 if (deallocated_sites.find(meta.q0) == deallocated_sites.end()) {
@@ -888,14 +883,12 @@ namespace NWQSim
                     sch_global.deallocate(mps_tensors[meta.q1]);
                     deallocated_sites.insert(meta.q1);
                 }
-        
-                // This update must happen on all ranks.
+                
                 bond_dims[meta.q0 + 1] = meta.new_bond_dim;
                 tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
                 bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
             }
         
-            // PHASE 3: Allocate the new, resized distributed tensors.
             std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
             for(const auto& site : deallocated_sites) {
                 site_to_new_tensor.emplace(
@@ -906,54 +899,53 @@ namespace NWQSim
                 sch_global.allocate(site_to_new_tensor.at(site));
             }
         
-            // PHASE 4: On each owner rank, create temporary LOCAL tensors, populate them
-            // with the computed data, and schedule a collective copy to the new global tensors.
+            // PHASE 4: Owner ranks prepare local data and schedule the collective copies.
             int local_result_idx = 0;
             for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
         
                 if (rank == meta.original_rank) {
                     auto& result_data = local_results[local_result_idx++];
-                    assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
+                    
+                    Tensor<Cplx> T0_temp{bond_tis[meta.q0], phys_tis[meta.q0], bond_tis[meta.q0 + 1]};
+                    Tensor<Cplx> T1_temp{bond_tis[meta.q1], phys_tis[meta.q1], bond_tis[meta.q1 + 1]};
+                    
+                    T0_temp.allocate(&ec_local_);
+                    T1_temp.allocate(&ec_local_);
         
-                    // Create temporary LOCAL tensors using the local execution context.
-                    tamm::Tensor<Cplx> T0_temp{bond_tis[meta.q0], phys_tis[meta.q0], bond_tis[meta.q0 + 1]};
-                    tamm::Tensor<Cplx> T1_temp{bond_tis[meta.q1], phys_tis[meta.q1], bond_tis[meta.q1 + 1]};
-                    T0_temp.set_dense();
-                    T1_temp.set_dense();
-                    sch_local_.allocate(T0_temp, T1_temp).execute(exec_hw);
-        
-                    // Put the raw vector data into the temporary LOCAL tensors.
                     tamm::span<Cplx> t0_span{result_data.new_T0_data};
                     tamm::span<Cplx> t1_span{result_data.new_T1_data};
                     T0_temp.put({0,0,0}, t0_span);
                     T1_temp.put({0,0,0}, t1_span);
         
-                    // Schedule a COLLECTIVE copy from the temporary local tensor (source)
-                    // to the newly allocated distributed tensor (destination). TAMM's runtime
-                    // will handle the underlying MPI communication automatically.
                     sch_global(site_to_new_tensor.at(meta.q0)() = T0_temp());
                     sch_global(site_to_new_tensor.at(meta.q1)() = T1_temp());
                     
-                    // The temporary local tensors are no longer needed and can be deallocated.
-                    sch_local_.deallocate(T0_temp, T1_temp).execute(exec_hw);
+                    T0_temp.deallocate();
+                    T1_temp.deallocate();
                 }
             }
         
-            // PHASE 5: All ranks execute the scheduled operations (deallocs, allocs, and copies).
-            // This is the main synchronization point.
+            // PHASE 5: All ranks execute scheduled operations. This call is collective and blocking.
             auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             sch_global.execute(exec_hw);
+        
+            // BARRIER: Ensures all communications from execute() are fully completed
+            // across all hardware before any rank proceeds. This provides a clean
+            // synchronization point before the next layer of gates.
             pg.barrier();
+            
             auto end_res_mgmt = std::chrono::high_resolution_clock::now();
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
             
-            // PHASE 6: Update the main MPS state vector to point to the new tensors.
+            // PHASE 6: Now that the state is globally consistent, update the main MPS state vector.
             for(auto const& [site, new_tensor] : site_to_new_tensor) {
                 mps_tensors[site] = new_tensor;
             }
         
-            std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
+            if (rank == 0) {
+                std::cout << "<< Exiting apply_collective_updates." << std::endl;
+            }
         }
 
         // In TN_TAMM class
