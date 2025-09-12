@@ -1156,89 +1156,88 @@ namespace NWQSim
             std::vector<Cplx>& U_row,
             std::vector<Cplx>& VT_row)
         {
-            int rank = pg.rank().value();
-            //std::cout << "[RANK " << rank << "] ---> gpu_svd_jacobi: Entered. Matrix dimensions (m, n): (" << m << ", " << n << ")." << std::endl;
-
-            cusolverDnXgesvdjSetTolerance(cu_ctx_.jp, 1e-3);
-            cusolverDnXgesvdjSetMaxSweeps(cu_ctx_.jp, 5);
-
             int lda = m;
             int ldu = m;
             int ldv = n;
-            int econ = 1; // Economy SVD
-            int k = std::min(m, n);
-
+            int k = std::min(std::min(m, n), static_cast<int>(max_bond_dim > 0 ? max_bond_dim : std::min(m, n)));
+        
             cuDoubleComplex* d_A = nullptr;
             double* d_S = nullptr;
             cuDoubleComplex* d_U = nullptr;
             cuDoubleComplex* d_V = nullptr;
             int* d_info = nullptr;
-
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Allocating GPU memory for A, S, U, V, info." << std::endl;
-            cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * (size_t)lda * (size_t)n);
-            cudaMalloc((void**)&d_S, sizeof(double) * (size_t)k);
-            cudaMalloc((void**)&d_U, sizeof(cuDoubleComplex) * (size_t)ldu * (size_t)k);
-            cudaMalloc((void**)&d_V, sizeof(cuDoubleComplex) * (size_t)ldv * (size_t)k);
+        
+            cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * static_cast<size_t>(lda) * static_cast<size_t>(n));
+            cudaMalloc((void**)&d_S, sizeof(double) * static_cast<size_t>(k));
+            cudaMalloc((void**)&d_U, sizeof(cuDoubleComplex) * static_cast<size_t>(ldu) * static_cast<size_t>(k));
+            cudaMalloc((void**)&d_V, sizeof(cuDoubleComplex) * static_cast<size_t>(ldv) * static_cast<size_t>(k));
             cudaMalloc((void**)&d_info, sizeof(int));
-
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Copying host matrix A to device." << std::endl;
-            cudaMemcpyAsync(d_A, reinterpret_cast<const cuDoubleComplex*>(A_h),
-                            sizeof(cuDoubleComplex) * (size_t)lda * (size_t)n,
-                            cudaMemcpyHostToDevice, cu_ctx_.stream);
-
-            int lwork_req = 0;
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Querying buffer size for Zgesvdj." << std::endl;
-            cusolverDnZgesvdj_bufferSize(cu_ctx_.solver, CUSOLVER_EIG_MODE_VECTOR, econ,
-                                         m, n, d_A, lda, d_S, d_U, ldu, d_V, ldv,
-                                         &lwork_req, cu_ctx_.jp);
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Required buffer size (lwork_req): " << lwork_req << "." << std::endl;
-
-            if (lwork_req > cu_ctx_.lwork_jac) {
-                //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Reallocating GPU workspace from " << cu_ctx_.lwork_jac << " to " << lwork_req << "." << std::endl;
-                if (cu_ctx_.d_work_jac) cudaFree(cu_ctx_.d_work_jac);
-                cu_ctx_.lwork_jac = lwork_req;
-                cudaMalloc((void**)&cu_ctx_.d_work_jac, sizeof(cuDoubleComplex) * (size_t)cu_ctx_.lwork_jac);
-            }
-
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Calling cusolverDnZgesvdj to perform SVD on GPU..." << std::endl;
-            cusolverDnZgesvdj(cu_ctx_.solver, CUSOLVER_EIG_MODE_VECTOR, econ,
-                              m, n, d_A, lda, d_S, d_U, ldu, d_V, ldv,
-                              reinterpret_cast<cuDoubleComplex*>(cu_ctx_.d_work_jac),
-                              cu_ctx_.lwork_jac, d_info, cu_ctx_.jp);
-
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Synchronizing CUDA stream..." << std::endl;
+        
+            cudaMemcpyAsync(d_A,
+                            reinterpret_cast<const cuDoubleComplex*>(A_h),
+                            sizeof(cuDoubleComplex) * static_cast<size_t>(lda) * static_cast<size_t>(n),
+                            cudaMemcpyHostToDevice,
+                            cu_ctx_.stream);
+        
+            gesvdaInfo_t ap = nullptr;
+            cusolverDnCreateGesvdaInfo(&ap);
+            cusolverDnXgesvdaSetTolerance(ap, 1e-3);
+            cusolverDnXgesvdaSetMaxSweeps(ap, 50);
+        
+            int lwork = 0;
+            cusolverDnZgesvda_bufferSize(cu_ctx_.solver,
+                                         CUSOLVER_EIG_MODE_VECTOR,
+                                         m, n, k,
+                                         d_A, lda,
+                                         d_S,
+                                         d_U, ldu,
+                                         d_V, ldv,
+                                         &lwork,
+                                         ap);
+        
+            cuDoubleComplex* d_work = nullptr;
+            cudaMalloc((void**)&d_work, sizeof(cuDoubleComplex) * static_cast<size_t>(lwork));
+        
+            cusolverDnZgesvda(cu_ctx_.solver,
+                              CUSOLVER_EIG_MODE_VECTOR,
+                              m, n, k,
+                              d_A, lda,
+                              d_S,
+                              d_U, ldu,
+                              d_V, ldv,
+                              d_work, lwork,
+                              d_info,
+                              ap);
+        
             cudaStreamSynchronize(cu_ctx_.stream);
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Stream synchronized. GPU computation finished." << std::endl;
-
-            S.resize((size_t)k);
-            std::vector<Cplx> U_col((size_t)ldu * (size_t)k);
-            std::vector<Cplx> V_col((size_t)ldv * (size_t)k);
-
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Copying results S, U, V from device to host." << std::endl;
-            cudaMemcpy(S.data(), d_S, sizeof(double) * (size_t)k, cudaMemcpyDeviceToHost);
-            cudaMemcpy(U_col.data(), d_U, sizeof(Cplx) * (size_t)ldu * (size_t)k, cudaMemcpyDeviceToHost);
-            cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * (size_t)ldv * (size_t)k, cudaMemcpyDeviceToHost);
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: D2H copy complete." << std::endl;
-
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Transposing U and V to row-major format." << std::endl;
-            U_row.resize((size_t)m * (size_t)k);
+        
+            S.resize(static_cast<size_t>(k));
+            std::vector<Cplx> U_col(static_cast<size_t>(ldu) * static_cast<size_t>(k));
+            std::vector<Cplx> V_col(static_cast<size_t>(ldv) * static_cast<size_t>(k));
+        
+            cudaMemcpy(S.data(), d_S, sizeof(double) * static_cast<size_t>(k), cudaMemcpyDeviceToHost);
+            cudaMemcpy(U_col.data(), d_U, sizeof(Cplx) * static_cast<size_t>(ldu) * static_cast<size_t>(k), cudaMemcpyDeviceToHost);
+            cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * static_cast<size_t>(ldv) * static_cast<size_t>(k), cudaMemcpyDeviceToHost);
+        
+            U_row.resize(static_cast<size_t>(m) * static_cast<size_t>(k));
             for (int i = 0; i < m; ++i)
                 for (int j = 0; j < k; ++j)
-                    U_row[(size_t)i * (size_t)k + (size_t)j] = U_col[(size_t)i + (size_t)j * (size_t)ldu];
-
-            VT_row.resize((size_t)k * (size_t)n);
+                    U_row[static_cast<size_t>(i) * static_cast<size_t>(k) + static_cast<size_t>(j)] =
+                        U_col[static_cast<size_t>(i) + static_cast<size_t>(j) * static_cast<size_t>(ldu)];
+        
+            VT_row.resize(static_cast<size_t>(k) * static_cast<size_t>(n));
             for (int i = 0; i < k; ++i)
                 for (int j = 0; j < n; ++j)
-                    VT_row[(size_t)i * (size_t)n + (size_t)j] = std::conj(V_col[(size_t)j + (size_t)i * (size_t)ldv]);
-
-            //std::cout << "[RANK " << rank << "] gpu_svd_jacobi: Freeing GPU memory." << std::endl;
+                    VT_row[static_cast<size_t>(i) * static_cast<size_t>(n) + static_cast<size_t>(j)] =
+                        std::conj(V_col[static_cast<size_t>(j) + static_cast<size_t>(i) * static_cast<size_t>(ldv)]);
+        
+            cusolverDnDestroyGesvdaInfo(ap);
+            cudaFree(d_work);
             cudaFree(d_info);
             cudaFree(d_V);
             cudaFree(d_U);
             cudaFree(d_S);
             cudaFree(d_A);
-
-            //std::cout << "[RANK " << rank << "] <--- gpu_svd_jacobi: Exiting." << std::endl;
         }
 
         IdxType local_svd_and_reconstruct_data(
