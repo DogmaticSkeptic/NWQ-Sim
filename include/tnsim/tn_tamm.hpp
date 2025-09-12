@@ -694,15 +694,15 @@ namespace NWQSim
         
             pg.barrier();
         
-            for (const auto &g : sequential_gates) {
-                if (g.op_name == OP::RESET) {
-                    RESET_GATE(g.qubit);
-                } else if (g.op_name == OP::M) {
-                    M_GATE(g.qubit);
-                } else if (g.op_name == OP::MA) {
-                    MA_GATE(g.qubit); 
-                }
-            }
+//            for (const auto &g : sequential_gates) {
+//                if (g.op_name == OP::RESET) {
+//                    RESET_GATE(g.qubit);
+//                } else if (g.op_name == OP::M) {
+//                    M_GATE(g.qubit);
+//                } else if (g.op_name == OP::MA) {
+//                    MA_GATE(g.qubit); 
+//                }
+//            }
         
             pg.barrier();
             if (rank == 0) {
