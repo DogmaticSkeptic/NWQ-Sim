@@ -694,15 +694,15 @@ namespace NWQSim
         
             pg.barrier();
         
-            for (const auto &g : sequential_gates) {
-                if (g.op_name == OP::RESET) {
-                    RESET_GATE(g.qubit);
-                } else if (g.op_name == OP::M) {
-                    M_GATE(g.qubit);
-                } else if (g.op_name == OP::MA) {
-                    MA_GATE(g.qubit); 
-                }
-            }
+//            for (const auto &g : sequential_gates) {
+//                if (g.op_name == OP::RESET) {
+//                    RESET_GATE(g.qubit);
+//                } else if (g.op_name == OP::M) {
+//                    M_GATE(g.qubit);
+//                } else if (g.op_name == OP::MA) {
+//                    MA_GATE(g.qubit); 
+//                }
+//            }
         
             pg.barrier();
             if (rank == 0) {
@@ -1160,7 +1160,7 @@ namespace NWQSim
             //std::cout << "[RANK " << rank << "] ---> gpu_svd_jacobi: Entered. Matrix dimensions (m, n): (" << m << ", " << n << ")." << std::endl;
 
             cusolverDnXgesvdjSetTolerance(cu_ctx_.jp, 1e-4);
-            cusolverDnXgesvdjSetMaxSweeps(cu_ctx_.jp, 100);
+            cusolverDnXgesvdjSetMaxSweeps(cu_ctx_.jp, 25);
 
             int lda = m;
             int ldu = m;
