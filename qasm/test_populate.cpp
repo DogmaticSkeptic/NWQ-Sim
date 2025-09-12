@@ -2,7 +2,7 @@
 #include <vector>
 #include <complex>
 #include <numeric>
-#include <cstring> // For memcpy
+#include <cstring> 
 #include <mpi.h>
 #include <tamm/tamm.hpp>
 
@@ -23,7 +23,7 @@ struct GateUpdateMetadata {
 
 // Boilerplate and helper functions
 using Cplx = std::complex<double>;
-// **CORRECTED LINE**
+// **CORRECTED LINE: It should be a tamm::Tensor of Cplx, not Cplx itself**
 using Tensor = tamm::Tensor<Cplx>;
 
 void print_local_data(int rank, const std::string& name, const std::vector<Cplx>& vec) {
@@ -42,9 +42,9 @@ bool verify_tensor_data(Tensor& t, size_t N) {
     std::cout << "\n[RANK " << rank << "] --- VERIFICATION PHASE ---" << std::endl;
 
     for (const auto& blockid : t.loop_nest()) {
-        auto [owner_rank, offset] = t.distribution().locate(blockid);
+        auto [owner_rank_val, offset] = t.distribution().locate(blockid);
 
-        if (owner_rank == t.execution_context()->pg().rank()) {
+        if (owner_rank_val == t.execution_context()->pg().rank()) {
             std::vector<Cplx> buf(t.block_size(blockid));
             t.get(blockid, buf);
             
@@ -107,8 +107,11 @@ int main(int argc, char* argv[]) {
             res.owner_rank = rank;
             res.new_bond_dim = new_dim_size;
             res.new_T0_data.resize(new_dim_size * new_dim_size);
-            for(size_t i=0; i < res.new_T0_data.size(); ++i) {
-                res.new_T0_data[i] = Cplx{double(i + 1.0), 0.0};
+            // Populate with expected data: val = i * N + j + 1
+            for(size_t i=0; i < new_dim_size; ++i) {
+                for(size_t j=0; j < new_dim_size; ++j) {
+                    res.new_T0_data[i * new_dim_size + j] = Cplx{double(i * new_dim_size + j + 1.0), 0.0};
+                }
             }
             local_results.push_back(res);
             std::cout << "[RANK " << rank << "] I am the owner. I have computed a local result with new_bond_dim = " << res.new_bond_dim << std::endl;
@@ -140,7 +143,6 @@ int main(int argc, char* argv[]) {
         }
 
         std::vector<GateUpdateMetadata> all_metadata(total_updates);
-        // Create a custom MPI type for the struct to be safe
         MPI_Datatype mpi_meta_type;
         MPI_Type_contiguous(sizeof(GateUpdateMetadata), MPI_BYTE, &mpi_meta_type);
         MPI_Type_commit(&mpi_meta_type);
@@ -175,19 +177,43 @@ int main(int argc, char* argv[]) {
         std::cout << "[RANK " << rank << "] Finished Phase 3." << std::endl;
         ec.pg().barrier();
 
-        // -- 4. THE FAULTY ONE-SIDED PUT --
-        std::cout << "\n[RANK " << rank << "] Entering Phase 4: Owner rank performs one-sided PUT." << std::endl;
+        // -- 4. CORRECTED ONE-SIDED PUT FROM OWNER RANK --
+        std::cout << "\n[RANK " << rank << "] Entering Phase 4: Owner rank performs one-sided PUT for each block." << std::endl;
 
         if (rank == meta.owner_rank) {
-             std::cout << "[RANK " << rank << "] >> I AM THE OWNER. EXECUTING PUT NOW. <<" << std::endl;
-             print_local_data(rank, "   Data being sent", local_results[0].new_T0_data);
-             global_tensor.put({0,0}, local_results[0].new_T0_data);
-             std::cout << "[RANK " << rank << "] >> PUT call has returned. <<" << std::endl;
+             std::cout << "[RANK " << rank << "] >> I AM THE OWNER. EXECUTING ALL PUTS. <<" << std::endl;
+             
+             // Loop over every block in the destination tensor
+             for (const auto& blockid : global_tensor.loop_nest()){
+                
+                // Get the dimensions and global offsets for this specific block
+                auto block_dims = global_tensor.block_dims(blockid);
+                auto block_offsets = global_tensor.block_offsets(blockid);
+                size_t block_size = global_tensor.block_size(blockid);
+
+                // Create a temporary local buffer for this block's data
+                std::vector<Cplx> block_buf(block_size);
+
+                // Manually pack the data from the full local tensor into the block buffer
+                size_t c = 0;
+                for (size_t i = block_offsets[0]; i < block_offsets[0] + block_dims[0]; ++i) {
+                    for (size_t j = block_offsets[1]; j < block_offsets[1] + block_dims[1]; ++j) {
+                        block_buf[c] = local_results[0].new_T0_data[i * new_dim_size + j];
+                        c++;
+                    }
+                }
+                
+                print_local_data(rank, "    Sending for block " + std::to_string(blockid[0]) + "," + std::to_string(blockid[1]), block_buf);
+
+                // Put the correctly sized and packed buffer into the correct block
+                global_tensor.put(blockid, block_buf);
+             }
+             
+             std::cout << "[RANK " << rank << "] >> ALL PUT calls have returned. <<" << std::endl;
         } else {
-             std::cout << "[RANK " << rank << "] I am not the owner. I am skipping the PUT call." << std::endl;
+             std::cout << "[RANK " << rank << "] I am not the owner. I am skipping the PUT calls." << std::endl;
         }
         std::cout << "[RANK " << rank << "] Finished Phase 4." << std::endl;
-
 
         // -- SYNCHRONIZATION --
         std::cout << "\n[RANK " << rank << "] --- Reaching critical synchronization barrier ---" << std::endl;
@@ -206,7 +232,7 @@ int main(int argc, char* argv[]) {
             if (final_result == 1) {
                 std::cout << "SUCCESS: All ranks reported correct data." << std::endl;
             } else {
-                std::cout << "FAILURE: At least one rank reported incorrect data. The data corruption bug is faithfully reproduced." << std::endl;
+                std::cout << "FAILURE: At least one rank reported incorrect data." << std::endl;
             }
             std::cout << "--------------------" << std::endl;
         }
