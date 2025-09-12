@@ -480,8 +480,8 @@ namespace NWQSim
 //        }
 //
 //        // In TN_TAMM class
-//        void print_mps_tensor(IdxType site)
-//        {
+        void print_mps_tensor(IdxType site)
+        {
 //            if (pg.rank().value() != 0) {
 //                return;
 //            }
