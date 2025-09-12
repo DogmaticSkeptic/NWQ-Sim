@@ -1150,7 +1150,7 @@ namespace NWQSim
             return result;
         }
 
-        // High-performance randomized SVD using cusolverDnXgesvdr
+        // High-performance randomized SVD using the modern CUDA 12.4 API for cusolverDnXgesvdr
         void gpu_randomized_svd(
             const Cplx* A_h, int m, int n, int k_rank,
             std::vector<double>& S,
@@ -1158,20 +1158,19 @@ namespace NWQSim
             std::vector<Cplx>& VT_row)
         {
             // --- Configuration for Randomized SVD ---
-            const int lda = m;
-            const int ldu = m;
-            const int ldv = n;
-            const int k = k_rank;
-            const int p = 20;
-            const int l = k + p;
-            unsigned long long seed = 12345;
+            const int64_t lda = m;
+            const int64_t ldu = m;
+            const int64_t ldv = n;
+            const int64_t k = k_rank;
+            const int64_t p = 20; // Oversampling parameter
+            const unsigned long long seed = 12345;
 
             // --- Device Memory Allocation ---
             cuDoubleComplex* d_A = nullptr;
             double* d_S = nullptr;
             cuDoubleComplex* d_U = nullptr;
             cuDoubleComplex* d_V = nullptr;
-            cuDoubleComplex* d_work = nullptr;
+            void* d_work = nullptr; // workspace is now void*
             int* d_info = nullptr;
 
             cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * lda * n);
@@ -1186,26 +1185,41 @@ namespace NWQSim
                             cudaMemcpyHostToDevice,
                             cu_ctx_.stream);
 
-            // --- SVD Execution using the 'gesvdr' API ---
-            int lwork = 0;
-            // 1. Query for workspace size - CORRECTED to use 'X'
-            cusolverDnXgesvdr_bufferSize(
-                cu_ctx_.solver, m, n, k, &lwork);
+            // --- SVD Execution using the MODERN 'gesvdr' API ---
 
-            cudaMalloc((void**)&d_work, sizeof(cuDoubleComplex) * lwork);
+            // 1. Create and set up the parameters object
+            cusolverDnParams_t params = nullptr;
+            cusolverDnCreateParams(&params);
 
-            // 2. Perform the Randomized SVD - CORRECTED to use 'X'
+            cusolverDnSetGesvdrParams(
+                params, m, n, k, p, lda, CUDA_C_64F, ldu, CUDA_C_64F, ldv, CUDA_C_64F, seed);
+
+            // 2. Query for workspace size using the params object
+            size_t workspace_bytes = 0;
+            cusolverDnGesvdr_bufferSize(
+                cu_ctx_.solver,
+                params,
+                CUDA_C_64F, // type A
+                d_S, CUDA_R_64F, // type S
+                d_U, CUDA_C_64F, // type U
+                d_V, CUDA_C_64F, // type V
+                &workspace_bytes);
+
+            cudaMalloc(&d_work, workspace_bytes);
+
+            // 3. Perform the Randomized SVD using the params object
             cusolverDnXgesvdr(
-                cu_ctx_.solver, m, n, k, p,
-                d_A, lda,
-                seed,
-                d_S,
-                d_U, ldu,
-                d_V, ldv,
-                d_work, lwork, d_info);
+                cu_ctx_.solver,
+                params,
+                d_A, CUDA_C_64F,
+                d_S, CUDA_R_64F,
+                d_U, CUDA_C_64F,
+                d_V, CUDA_C_64F,
+                d_work, workspace_bytes,
+                d_info);
 
             cudaStreamSynchronize(cu_ctx_.stream);
-            
+
             // --- Copy Results from Device to Host ---
             S.resize(k);
             std::vector<Cplx> U_col(ldu * k);
@@ -1231,6 +1245,7 @@ namespace NWQSim
             }
 
             // --- Cleanup ---
+            cusolverDnDestroyParams(params); // Destroy the params object
             cudaFree(d_work);
             cudaFree(d_info);
             cudaFree(d_V);
