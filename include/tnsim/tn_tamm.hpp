@@ -899,16 +899,18 @@ namespace NWQSim
                 sch_global.allocate(site_to_new_tensor.at(site));
             }
         
-            // PHASE 4: Owner ranks prepare local data and schedule the collective copies.
+            // PHASE 4: Owner ranks prepare local data and schedule the collective copy.
             int local_result_idx = 0;
             for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
         
                 if (rank == meta.original_rank) {
                     auto& result_data = local_results[local_result_idx++];
-                    
-                    Tensor<Cplx> T0_temp{bond_tis[meta.q0], phys_tis[meta.q0], bond_tis[meta.q0 + 1]};
-                    Tensor<Cplx> T1_temp{bond_tis[meta.q1], phys_tis[meta.q1], bond_tis[meta.q1 + 1]};
+                    assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
+        
+                    // **FIX**: Added the `tamm::` namespace qualifier to the Tensor type.
+                    tamm::Tensor<Cplx> T0_temp{bond_tis[meta.q0], phys_tis[meta.q0], bond_tis[meta.q0 + 1]};
+                    tamm::Tensor<Cplx> T1_temp{bond_tis[meta.q1], phys_tis[meta.q1], bond_tis[meta.q1 + 1]};
                     
                     T0_temp.allocate(&ec_local_);
                     T1_temp.allocate(&ec_local_);
@@ -926,19 +928,17 @@ namespace NWQSim
                 }
             }
         
-            // PHASE 5: All ranks execute scheduled operations. This call is collective and blocking.
+            // PHASE 5: All ranks execute scheduled operations together.
             auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             sch_global.execute(exec_hw);
-        
-            // BARRIER: Ensures all communications from execute() are fully completed
-            // across all hardware before any rank proceeds. This provides a clean
-            // synchronization point before the next layer of gates.
+            
+            // BARRIER: Ensures all communications from execute() are globally complete.
             pg.barrier();
             
             auto end_res_mgmt = std::chrono::high_resolution_clock::now();
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
             
-            // PHASE 6: Now that the state is globally consistent, update the main MPS state vector.
+            // PHASE 6: Update the main MPS state vector.
             for(auto const& [site, new_tensor] : site_to_new_tensor) {
                 mps_tensors[site] = new_tensor;
             }
