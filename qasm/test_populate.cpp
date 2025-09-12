@@ -23,7 +23,8 @@ struct GateUpdateMetadata {
 
 // Boilerplate and helper functions
 using Cplx = std::complex<double>;
-using Tensor = t::Tensor<Cplx>;
+// **CORRECTED LINE**
+using Tensor = tamm::Tensor<Cplx>;
 
 void print_local_data(int rank, const std::string& name, const std::vector<Cplx>& vec) {
     std::cout << "[RANK " << rank << "] " << name << ": [ ";
@@ -38,7 +39,7 @@ bool verify_tensor_data(Tensor& t, size_t N) {
     bool local_success = true;
     int rank = t.execution_context()->pg().rank().value();
 
-    std::cout << "[RANK " << rank << "] --- VERIFICATION PHASE ---" << std::endl;
+    std::cout << "\n[RANK " << rank << "] --- VERIFICATION PHASE ---" << std::endl;
 
     for (const auto& blockid : t.loop_nest()) {
         auto [owner_rank, offset] = t.distribution().locate(blockid);
@@ -139,6 +140,7 @@ int main(int argc, char* argv[]) {
         }
 
         std::vector<GateUpdateMetadata> all_metadata(total_updates);
+        // Create a custom MPI type for the struct to be safe
         MPI_Datatype mpi_meta_type;
         MPI_Type_contiguous(sizeof(GateUpdateMetadata), MPI_BYTE, &mpi_meta_type);
         MPI_Type_commit(&mpi_meta_type);
@@ -188,7 +190,7 @@ int main(int argc, char* argv[]) {
 
 
         // -- SYNCHRONIZATION --
-        std::cout << "[RANK " << rank << "] --- Reaching critical synchronization barrier ---" << std::endl;
+        std::cout << "\n[RANK " << rank << "] --- Reaching critical synchronization barrier ---" << std::endl;
         ec.pg().barrier();
         std::cout << "[RANK " << rank << "] --- Passed critical synchronization barrier ---" << std::endl;
         
