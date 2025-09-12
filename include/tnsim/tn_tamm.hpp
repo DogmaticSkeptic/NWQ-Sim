@@ -710,7 +710,7 @@ namespace NWQSim
             }
         }
 
-        // Replace the existing run_gates_parallel function with this one
+        // REPLACE the existing run_gates_parallel function with this corrected one.
         std::vector<LocalGateResult> run_gates_parallel(const std::vector<SVGate>& batch)
         {
             int rank = pg.rank().value();
@@ -733,17 +733,11 @@ namespace NWQSim
                 std::cout << "[RANK " << rank << "] picked up gate index " << gate_idx << " (op: " 
                           << g.op_name << ", q: " << g.qubit << ", c: " << g.ctrl << ")" << std::endl;
         
+                // UNIFIED LOGIC: Both gate types now return a LocalGateResult
                 if (g.op_name == OP::C1) {
-                    auto& tensor_to_update = mps_tensors[g.qubit];
-                    auto [owner_proc, offset] = tensor_to_update.distribution().locate(*(tensor_to_update.loop_nest().begin()));
-                    
-                    std::cout << "[RANK " << rank << "] Gate " << gate_idx << " is C1 on qubit " << g.qubit 
-                              << ". Owner is rank " << owner_proc.value() << "." << std::endl;
-        
-                    if (pg.rank() == owner_proc) {
-                        std::array<Cplx, 4> U;
-                        for (int i = 0; i < 4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
-                        C1_GATE_local_kernel(tensor_to_update, g.qubit, U);
+                    LocalGateResult result = C1_GATE_COMPUTE(g);
+                    if (result.is_valid) {
+                        local_results.push_back(std::move(result));
                     }
                 } else if (g.op_name == OP::C2) {
                     std::cout << "[RANK " << rank << "] Computing C2 gate on qubits (" << g.ctrl << ", " << g.qubit << ")." << std::endl;
@@ -897,39 +891,41 @@ namespace NWQSim
             std::cout << "[RANK " << rank << "] >> Finished populating global tensor." << std::endl;
         }
         
-        
-        // REPLACE your existing apply_collective_updates with this one
+        // REPLACE the existing apply_collective_updates with this more general version.
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
             std::cout << "[RANK " << rank << "] >> ENTERING apply_collective_updates with "
                       << local_results.size() << " local results." << std::endl;
         
-            // PHASE 1: Gather metadata from all ranks.
+            // PHASE 1: Gather metadata from all ranks (this part is unchanged and correct)
             auto all_metadata = allgather_metadata(local_results);
-            std::cout << "[RANK " << rank << "] PHASE 1: Finished allgather_metadata. Found "
-                      << all_metadata.size() << " total updates." << std::endl;
         
             tamm::Scheduler sch_global{ec};
         
-            // PHASE 2 & 3: All ranks collectively schedule deallocations and allocations.
-            std::cout << "[RANK " << rank << "] PHASE 2/3: Scheduling deallocations and allocations..." << std::endl;
+            // PHASE 2 & 3: Schedule deallocations and allocations.
+            // This logic is now generalized to handle 1-qubit or 2-qubit updates.
             std::set<IdxType> deallocated_sites;
             for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
         
+                // Deallocate tensor for q0
                 if (deallocated_sites.find(meta.q0) == deallocated_sites.end()) {
                     sch_global.deallocate(mps_tensors[meta.q0]);
                     deallocated_sites.insert(meta.q0);
                 }
-                if (deallocated_sites.find(meta.q1) == deallocated_sites.end()) {
+                // Deallocate tensor for q1, if it's a valid qubit (i.e., a 2Q gate)
+                if (meta.q1 != -1 && deallocated_sites.find(meta.q1) == deallocated_sites.end()) {
                     sch_global.deallocate(mps_tensors[meta.q1]);
                     deallocated_sites.insert(meta.q1);
                 }
         
-                bond_dims[meta.q0 + 1] = meta.new_bond_dim;
-                tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
-                bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+                // Update bond dimension if it changed (only for 2Q gates)
+                if (meta.q1 != -1) {
+                    bond_dims[meta.q0 + 1] = meta.new_bond_dim;
+                    tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
+                    bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+                }
             }
         
             std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
@@ -946,44 +942,41 @@ namespace NWQSim
             sch_global.execute(exec_hw);
             auto end_res_mgmt = std::chrono::high_resolution_clock::now();
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
-            std::cout << "[RANK " << rank << "] PHASE 2/3: Finished deallocations and allocations." << std::endl;
-        
-            // PHASE 4: Owner ranks perform one-sided PUTs to populate the new tensors.
-            std::cout << "[RANK " << rank << "] PHASE 4: Entering loop to perform one-sided PUTs..." << std::endl;
+            
+            // PHASE 4: Owner ranks perform one-sided PUTs.
+            // This logic is now generalized.
             int local_result_idx = 0;
             for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
         
                 if (rank == meta.original_rank) {
-                    std::cout << "[RANK " << rank << "] DEBUG: I am owner for qubits (" << meta.q0
-                              << ", " << meta.q1 << "). Preparing to PUT data." << std::endl;
-        
                     auto& result_data = local_results[local_result_idx++];
-                    assert(result_data.q0 == meta.q0 && result_data.q1 == meta.q1);
-        
                     auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
-                    auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
         
-                    // Get the full dimensions of the local data to help with indexing
+                    // Get full dimensions for T0
                     std::vector<size_t> t0_full_dims = {
                         (size_t)bond_dims[meta.q0], 
                         (size_t)phys_dims[meta.q0], 
-                        (size_t)meta.new_bond_dim
+                        (size_t)bond_dims[meta.q0 + 1]
                     };
-                    std::vector<size_t> t1_full_dims = {
-                        (size_t)meta.new_bond_dim, 
-                        (size_t)phys_dims[meta.q1], 
-                        (size_t)bond_dims[meta.q1 + 1]
-                    };
-        
+                    
                     auto start_put = std::chrono::high_resolution_clock::now();
                     populate_tensor_from_local_data(new_T0_ref, result_data.new_T0_data, t0_full_dims);
-                    populate_tensor_from_local_data(new_T1_ref, result_data.new_T1_data, t1_full_dims);
+                    
+                    // If it was a 2Q gate, also populate T1
+                    if (meta.q1 != -1) {
+                        auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
+                        std::vector<size_t> t1_full_dims = {
+                            (size_t)bond_dims[meta.q1], 
+                            (size_t)phys_dims[meta.q1], 
+                            (size_t)bond_dims[meta.q1 + 1]
+                        };
+                        populate_tensor_from_local_data(new_T1_ref, result_data.new_T1_data, t1_full_dims);
+                    }
                     auto end_put = std::chrono::high_resolution_clock::now();
                     total_data_movement_time += (end_put - start_put);
                 }
             }
-            std::cout << "[RANK " << rank << "] PHASE 4: Finished loop for one-sided PUTs." << std::endl;
             
             // -- SYNCHRONIZATION --
             auto start_sync = std::chrono::high_resolution_clock::now();
@@ -992,7 +985,6 @@ namespace NWQSim
             total_synchronization_time += (end_sync - start_sync);
             
             // PHASE 5: Update the main MPS state vector.
-            std::cout << "[RANK " << rank << "] PHASE 5: Updating mps_tensors with new handles." << std::endl;
             for(auto const& [site, new_tensor] : site_to_new_tensor) {
                 mps_tensors[site] = new_tensor;
             }
@@ -1077,79 +1069,79 @@ namespace NWQSim
             return result;
         }
 
-        void C1_GATE_local_kernel(tamm::Tensor<Cplx>& target_tensor, IdxType q_idx, const std::array<Cplx, 4>& U)
+        LocalGateResult C1_GATE_COMPUTE(const SVGate& g)
         {
             int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] --> C1_GATE_local_kernel on qubit " << q_idx << "." << std::endl;
+            IdxType q_idx = g.qubit;
+            std::cout << "[RANK " << rank << "] --> C1_GATE_COMPUTE on qubit " << q_idx << "." << std::endl;
             
-            // --- Setup a temporary, self-contained local execution environment ---
             auto start_res_mgmt = std::chrono::high_resolution_clock::now();
-            tamm::ProcGroup self_pg = tamm::ProcGroup::create_self();
-            tamm::ExecutionContext ec_local{self_pg, tamm::DistributionKind::dense, tamm::MemoryManagerKind::local};
-            tamm::Scheduler sch_local{ec_local};
         
-            // --- Define local tensor shapes based on the global tensor ---
-            auto tis_l = target_tensor.tiled_index_spaces()[0];
-            auto tis_p = target_tensor.tiled_index_spaces()[1];
-            auto tis_r = target_tensor.tiled_index_spaces()[2];
+            // 1. Get a reference to the global tensor we need to update
+            auto& target_tensor_global = mps_tensors[q_idx];
         
-            tamm::Tensor<Cplx> G_local({tis_p, tis_p});
-            tamm::Tensor<Cplx> T_new_local({tis_l, tis_p, tis_r});
+            // 2. Create local TAMM tensors for the computation
+            auto tis_l = target_tensor_global.tiled_index_spaces()[0];
+            auto tis_p = target_tensor_global.tiled_index_spaces()[1];
+            auto tis_r = target_tensor_global.tiled_index_spaces()[2];
+        
             tamm::Tensor<Cplx> T_in_local({tis_l, tis_p, tis_r});
-            G_local.set_dense(); T_new_local.set_dense(); T_in_local.set_dense();
+            tamm::Tensor<Cplx> T_new_local({tis_l, tis_p, tis_r});
+            tamm::Tensor<Cplx> G_local({tis_p, tis_p});
+            T_in_local.set_dense(); T_new_local.set_dense(); G_local.set_dense();
+            sch_local_.allocate(T_in_local, T_new_local, G_local).execute(exec_hw);
         
-            sch_local.allocate(G_local, T_new_local, T_in_local).execute(exec_hw);
             auto end_res_mgmt = std::chrono::high_resolution_clock::now();
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
         
-            // --- Populate the local gate matrix tensor ---
+            // 3. Get the data from the global tensor into our local tensor
+            auto start_get = std::chrono::high_resolution_clock::now();
+            // Use a temporary std::vector buffer for the transfer
+            std::vector<Cplx> t_in_buf(T_in_local.size());
+            target_tensor_global.get(*(target_tensor_global.loop_nest().begin()), t_in_buf);
+            T_in_local.put(*(T_in_local.loop_nest().begin()), t_in_buf);
+            auto end_get = std::chrono::high_resolution_clock::now();
+            total_data_movement_time += (end_get - start_get);
+        
+            // 4. Populate the local gate matrix
+            std::array<Cplx, 4> U;
+            for (int i = 0; i < 4; ++i) U[i] = Cplx(g.gm_real[i], g.gm_imag[i]);
             Cplx* g_local_buf = G_local.access_local_buf();
             for (tamm::Index p_prime = 0; p_prime < 2; ++p_prime) {
                 for (tamm::Index p_in = 0; p_in < 2; ++p_in) {
                     g_local_buf[p_prime * 2 + p_in] = U[p_prime * 2 + p_in];
                 }
             }
-            
-            // --- Get data from global tensor into a local TAMM tensor ---
-            auto start_get = std::chrono::high_resolution_clock::now();
-            std::vector<Cplx> t_in_buf(T_in_local.size());
-            target_tensor.get(*(target_tensor.loop_nest().begin()), t_in_buf);
-            T_in_local.put(*(T_in_local.loop_nest().begin()), t_in_buf);
-            auto end_get = std::chrono::high_resolution_clock::now();
-            total_data_movement_time += (end_get - start_get);
-            
-            // **DIAGNOSTIC PRINT (INPUT)**
-            print_buffer_diag("C1 INPUT TENSOR", q_idx, t_in_buf);
         
-            // --- Perform the contraction using TAMM's scheduler ---
+            // 5. Perform the contraction
             auto start_contraction = std::chrono::high_resolution_clock::now();
-            sch_local(T_new_local("l","p'","r") = G_local("p'","p") * T_in_local("l","p","r")).execute(exec_hw);
+            sch_local_(T_new_local("l","p'","r") = G_local("p'","p") * T_in_local("l","p","r")).execute(exec_hw);
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
         
-            // --- Get the result from the local result tensor ---
-            std::vector<Cplx> t_out_buf(T_new_local.size());
-            T_new_local.get(*(T_new_local.loop_nest().begin()), t_out_buf);
-            
-            // **DIAGNOSTIC PRINT (OUTPUT)**
-            print_buffer_diag("C1 OUTPUT TENSOR", q_idx, t_out_buf);
+            // 6. Get the result data out of the local result tensor
+            std::vector<Cplx> t_out_data(T_new_local.size());
+            T_new_local.get(*(T_new_local.loop_nest().begin()), t_out_data);
         
-            // --- Put the result back into the global tensor ---
-            auto start_put = std::chrono::high_resolution_clock::now();
-            target_tensor.put(*(target_tensor.loop_nest().begin()), t_out_buf);
-            auto end_put = std::chrono::high_resolution_clock::now();
-            total_data_movement_time += (end_put - start_put);
-            
-            // --- Clean up local resources ---
+            // 7. Clean up local resources
             start_res_mgmt = std::chrono::high_resolution_clock::now();
-            sch_local.deallocate(G_local, T_new_local, T_in_local).execute(exec_hw);
-            self_pg.destroy_coll();
+            sch_local_.deallocate(T_in_local, T_new_local, G_local).execute(exec_hw);
             end_res_mgmt = std::chrono::high_resolution_clock::now();
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
+        
+            // 8. Package and return the result
+            LocalGateResult result;
+            result.is_valid = true;
+            result.q0 = q_idx;
+            result.q1 = -1; // Use an invalid index to signify a 1-qubit update
+            result.new_bond_dim = bond_dims[q_idx + 1]; // Bond dim doesn't change
+            result.new_T0_data = std::move(t_out_data);
+            // new_T1_data is empty, which is fine
+            result.original_rank = rank;
             
-            std::cout << "[RANK " << rank << "] <-- C1_GATE_local_kernel on qubit " << q_idx << " finished." << std::endl;
+            std::cout << "[RANK " << rank << "] <-- C1_GATE_COMPUTE on qubit " << q_idx << " finished." << std::endl;
+            return result;
         }
-
 
 
         void gpu_svd_jacobi(
