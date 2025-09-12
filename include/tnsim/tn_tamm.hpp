@@ -858,46 +858,38 @@ namespace NWQSim
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
-            std::cout << "[RANK " << rank << "] >> Entering apply_collective_updates with "
-                      << local_results.size() << " local results." << std::endl;
+            if (rank == 0) {
+                std::cout << ">> Entering apply_collective_updates..." << std::endl;
+            }
         
+            // PHASE 1: Gather metadata from all ranks to get a global view of all updates.
             auto start_gather = std::chrono::high_resolution_clock::now();
             auto all_metadata = allgather_metadata(local_results);
             auto end_gather = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_gather - start_gather);
         
-            std::cout << "[RANK " << rank << "] apply_collective_updates: Metadata gathered. Total updates to apply: "
-                      << all_metadata.size() << std::endl;
-        
             tamm::Scheduler sch_global{ec};
         
-            // --- PHASE 1: Deallocate old tensors and update bond dimension metadata ---
-            std::cout << "[RANK " << rank << "] --- apply_collective_updates: PHASE 1 [Deallocation Planning] ---" << std::endl;
+            // PHASE 2 & 3: All ranks collectively schedule deallocations and allocations.
+            // This ensures every process agrees on the new tensor shapes before data is moved.
             std::set<IdxType> deallocated_sites;
-            for (const auto& meta : all_metadata)
-            {
+            for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
         
                 if (deallocated_sites.find(meta.q0) == deallocated_sites.end()) {
-                    std::cout << "[RANK " << rank << "]   - Queuing deallocation for site " << meta.q0 << std::endl;
                     sch_global.deallocate(mps_tensors[meta.q0]);
                     deallocated_sites.insert(meta.q0);
                 }
                 if (deallocated_sites.find(meta.q1) == deallocated_sites.end()) {
-                    std::cout << "[RANK " << rank << "]   - Queuing deallocation for site " << meta.q1 << std::endl;
                     sch_global.deallocate(mps_tensors[meta.q1]);
                     deallocated_sites.insert(meta.q1);
                 }
-        
-                std::cout << "[RANK " << rank << "]   - Updating bond dimension for link " << meta.q0+1
-                          << " to " << meta.new_bond_dim << std::endl;
+                
                 bond_dims[meta.q0 + 1] = meta.new_bond_dim;
                 tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
                 bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
             }
         
-            // --- PHASE 2: Allocate new tensors with the now-consistent dimensions ---
-            std::cout << "[RANK " << rank << "] --- apply_collective_updates: PHASE 2 [Allocation Planning] ---" << std::endl;
             std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
             for(const auto& site : deallocated_sites) {
                 site_to_new_tensor.emplace(
@@ -905,22 +897,11 @@ namespace NWQSim
                     tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]}
                 );
                 site_to_new_tensor.at(site).set_dense();
-                std::cout << "[RANK " << rank << "]   - Queuing allocation for new tensor at site " << site << std::endl;
                 sch_global.allocate(site_to_new_tensor.at(site));
             }
+            sch_global.execute(exec_hw); // Execute deallocations and allocations now.
         
-            std::cout << "[RANK " << rank << "] apply_collective_updates: Executing collective deallocations and allocations..." << std::endl;
-            auto start_res_mgmt = std::chrono::high_resolution_clock::now();
-            sch_global.execute(exec_hw);
-            auto end_res_mgmt = std::chrono::high_resolution_clock::now();
-            total_resource_management_time += (end_res_mgmt - start_res_mgmt);
-            std::cout << "[RANK " << rank << "] apply_collective_updates: Deallocations and allocations complete." << std::endl;
-        
-            // --- PHASE 3: Transfer data from compute ranks to new tensors ---
-            std::cout << "[RANK " << rank << "] --- apply_collective_updates: PHASE 3 [Data Transfer] ---" << std::endl;
-            std::cout << "[RANK " << rank << "]   - BARRIER before data puts." << std::endl;
-            pg.barrier();
-        
+            // PHASE 4: Owner ranks perform one-sided PUTs to populate the new tensors.
             int local_result_idx = 0;
             for (const auto& meta : all_metadata) {
                 if (!meta.is_valid) continue;
@@ -932,34 +913,33 @@ namespace NWQSim
                     auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
                     auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
         
-                    std::cout << "[RANK " << rank << "]   - I AM THE OWNER (" << meta.original_rank
-                              << "). Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
-                    
-                    // --- DIAGNOSTIC: Print the data being transferred ---
-                    print_buffer_diag("PUTTING", meta.q0, result_data.new_T0_data);
-                    print_buffer_diag("PUTTING", meta.q1, result_data.new_T1_data);
-        
                     tamm::span<Cplx> t0_span{result_data.new_T0_data};
                     tamm::span<Cplx> t1_span{result_data.new_T1_data};
         
-                    new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), t0_span);
-                    new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), t1_span);
-                    
-                    std::cout << "[RANK " << rank << "]   - Put issued for (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
+                    // **FIX #1**: Use an explicit starting coordinate for the one-sided put.
+                    // Since our tensors are dense and single-block, {0,0,0} is the correct
+                    // starting point to write the entire buffer.
+                    tamm::IndexVector start_index{0, 0, 0};
+                    new_T0_ref.put(start_index, t0_span);
+                    new_T1_ref.put(start_index, t1_span);
                 }
             }
         
-            std::cout << "[RANK " << rank << "]   - BARRIER after data puts." << std::endl;
+            // **FIX #2**: Add a barrier for global synchronization.
+            // This is the critical step that ensures all one-sided 'put' operations from all
+            // owner ranks are completed and visible to all other ranks before anyone proceeds.
+            // Without this, non-owner ranks would read stale (e.g., zero) data.
             pg.barrier();
-        
-            // --- PHASE 4: Update the main MPS state with the new tensors ---
-            std::cout << "[RANK " << rank << "] --- apply_collective_updates: PHASE 4 [State Update] ---" << std::endl;
+            
+            // PHASE 5: Now that the new tensors are fully and consistently populated,
+            // update the main MPS state vector to point to them.
             for(auto const& [site, new_tensor] : site_to_new_tensor) {
-                std::cout << "[RANK " << rank << "]   - Updating mps_tensors[" << site << "] with new tensor handle." << std::endl;
                 mps_tensors[site] = new_tensor;
             }
         
-            std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
+            if (rank == 0) {
+                std::cout << "<< Exiting apply_collective_updates." << std::endl;
+            }
         }
 
         // In TN_TAMM class
