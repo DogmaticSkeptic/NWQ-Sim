@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <complex>
+#include <numeric> // For std::iota
 #include <mpi.h>
 #include <tamm/tamm.hpp>
 
@@ -15,6 +16,24 @@ void print_vector(int rank, const std::string& name, const std::vector<Cplx>& ve
     std::cout << "]" << std::endl;
 }
 
+// Helper to print the contents of a distributed tensor from a single rank (usually 0)
+void print_distributed_tensor(Tensor& t, int rank_to_print_from) {
+    if (t.execution_context()->pg().rank().value() != rank_to_print_from) return;
+
+    std::cout << "\n--- Verifying contents of distributed tensor on RANK " << rank_to_print_from << " ---" << std::endl;
+    for (const auto& blockid : t.loop_nest()) {
+        std::vector<Cplx> buf(t.block_size(blockid));
+        t.get(blockid, buf);
+        std::cout << "  Block " << blockid << ": [ ";
+        for(const auto& val : buf) {
+            std::cout << "(" << val.real() << "," << val.imag() << ") ";
+        }
+        std::cout << "]" << std::endl;
+    }
+    std::cout << "--------------------------------------------------------" << std::endl;
+}
+
+
 int main(int argc, char* argv[]) {
     MPI_Init(&argc, &argv);
     tamm::initialize(argc, argv);
@@ -26,81 +45,86 @@ int main(int argc, char* argv[]) {
     int rank = ec.pg().rank().value();
     int size = ec.pg().size().value();
 
-    if (size < 3) {
-        if (rank == 0) std::cerr << "ERROR: This test requires at least 3 MPI ranks." << std::endl;
-        // Don't return early. Let all ranks finalize properly.
+    if (size < 2) {
+        if (rank == 0) std::cerr << "ERROR: This test requires at least 2 MPI ranks to demonstrate distribution." << std::endl;
     } else {
         // -- SETUP --
-        // **FIX**: Specify the tile size to be 2. This creates a TiledIndexSpace
-        // where the entire 2x2 space is a single block.
-        tamm::TiledIndexSpace TIS{tamm::IndexSpace{tamm::range(2)}, /*tile_size=*/2};
-        
-        Tensor old_T0{TIS, TIS};
-        Tensor old_T1{TIS, TIS};
-        sch.allocate(old_T0, old_T1)(old_T0() = 0.0)(old_T1() = 0.0).execute();
-        if (rank == 0) std::cout << "Step 1: Initialized two 'old' distributed tensors." << std::endl;
+        // Use a small TiledIndexSpace for the 'old' tensor. It's not distributed.
+        tamm::TiledIndexSpace TIS_old{tamm::IndexSpace{tamm::range(1)}, 1}; 
+        Tensor old_T0{TIS_old};
+        sch.allocate(old_T0)(old_T0() = 0.0).execute();
+        if (rank == 0) std::cout << "Step 1: Initialized 'old' tensor." << std::endl;
 
         // -- SIMULATING apply_collective_updates --
-        struct UpdateMeta { int owner_T0 = 1; int owner_T1 = 2; };
-        UpdateMeta meta;
-        if (rank == 0) std::cout << "Step 2: Metadata exchanged. Rank 1 will update T0, Rank 2 will update T1." << std::endl;
+        struct UpdateMeta { int owner = 1; };
+        UpdateMeta meta; // All ranks have this metadata.
+        if (rank == 0) std::cout << "Step 2: Metadata exchanged. Rank " << meta.owner << " will update the new tensor." << std::endl;
+        
+        // **KEY CHANGE**: Create a TiledIndexSpace that WILL be tiled and distributed.
+        // Index space of size 4, with each tile being of size 2. This creates 2 tiles.
+        // A 2D tensor will therefore have 2x2 = 4 blocks, which will be distributed.
+        const size_t N = 4;
+        const size_t TILE_SIZE = 2;
+        tamm::TiledIndexSpace TIS_new{tamm::IndexSpace{tamm::range(N)}, TILE_SIZE};
 
-        Tensor new_T0{TIS, TIS};
-        Tensor new_T1{TIS, TIS};
-        sch.deallocate(old_T0, old_T1).allocate(new_T0, new_T1).execute();
-        if (rank == 0) std::cout << "Step 3: All ranks collectively deallocated/reallocated tensors." << std::endl;
+        Tensor new_T0{TIS_new, TIS_new};
+
+        sch.deallocate(old_T0).allocate(new_T0).execute();
+        if (rank == 0) std::cout << "Step 3: All ranks collectively deallocated 'old' and allocated 'new' distributed tensor." << std::endl;
 
         ec.pg().barrier();
 
-        if (rank == meta.owner_T0) {
-            std::vector<Cplx> data_for_T0 = {Cplx{1,0}, Cplx{1,0}, Cplx{1,0}, Cplx{1,0}};
-            print_vector(rank, "My local data for new_T0", data_for_T0);
+        // **THE ACTION**: Only the owner rank prepares the full data and issues a single PUT.
+        if (rank == meta.owner) {
+            std::vector<Cplx> data_for_T0(N * N);
+            // Fill with a recognizable pattern, e.g., 1.0, 2.0, 3.0 ...
+            for(size_t i=0; i<data_for_T0.size(); ++i) data_for_T0[i] = Cplx{double(i+1), 0.0};
+            
+            print_vector(rank, "My local data for the ENTIRE new_T0", data_for_T0);
             std::cout << "[RANK " << rank << "] Issuing one-sided PUT for new_T0..." << std::endl;
-            // Now, {0,0} refers to the entire 2x2 block, so all 4 elements are written.
-            new_T0.put({0,0}, data_for_T0);
-        }
-        if (rank == meta.owner_T1) {
-            std::vector<Cplx> data_for_T1 = {Cplx{2,0}, Cplx{2,0}, Cplx{2,0}, Cplx{2,0}};
-            print_vector(rank, "My local data for new_T1", data_for_T1);
-            std::cout << "[RANK " << rank << "] Issuing one-sided PUT for new_T1..." << std::endl;
-            new_T1.put({0,0}, data_for_T1);
+            
+            // This 'put' should write the contiguous `data_for_T0` into the memory
+            // of the distributed `new_T0` tensor, wherever its blocks may live.
+            // This is the operation that is failing in the main code.
+            new_T0.put({}, data_for_T0); // {} means put to the whole tensor
         }
 
-        // The barrier is still essential for synchronization.
+        // This barrier is essential. It ensures that all ranks wait until the owner's PUT
+        // operation has completed before they proceed to the verification step.
         ec.pg().barrier();
         
         // -- VERIFICATION --
+        // Print the tensor's contents from each rank's perspective.
+        // We expect to see incorrect (zero) values on ranks that are not Rank 0.
+        print_distributed_tensor(new_T0, 0);
+        print_distributed_tensor(new_T0, 1);
+        
         if (rank == 0) {
-            std::cout << "\n--- Verification on Rank 0 ---" << std::endl;
-            
-            std::vector<Cplx> data_from_T0(4);
-            std::vector<Cplx> data_from_T1(4);
-
-            new_T0.get({0,0}, data_from_T0);
-            new_T1.get({0,0}, data_from_T1);
-
-            print_vector(rank, "Data I received from new_T0", data_from_T0);
-            print_vector(rank, "Data I received from new_T1", data_from_T1);
-
-            // A more robust success check
             bool success = true;
-            for(const auto& v : data_from_T0) if(v != Cplx{1,0}) success = false;
-            for(const auto& v : data_from_T1) if(v != Cplx{2,0}) success = false;
-            
-            if (success) {
-                std::cout << "SUCCESS: Rank 0 received the complete and correct data." << std::endl;
-            } else {
-                std::cout << "FAILURE: Rank 0 received incorrect or partial data." << std::endl;
+            size_t count = 1;
+            for (const auto& blockid : new_T0.loop_nest()) {
+                std::vector<Cplx> buf(new_T0.block_size(blockid));
+                new_T0.get(blockid, buf);
+                for(const auto& val : buf) {
+                    if (val != Cplx{double(count++), 0.0}) {
+                        success = false;
+                        break;
+                    }
+                }
+                if (!success) break;
             }
-            std::cout << "------------------------------" << std::endl;
+
+            if (success) {
+                std::cout << "\nSUCCESS: Rank 0 verified the complete and correct data." << std::endl;
+            } else {
+                std::cout << "\nFAILURE: Rank 0 received incorrect or partial data. This reproduces the bug." << std::endl;
+            }
         }
         
-        sch.deallocate(new_T0, new_T1).execute();
-    } // End of the main logic block
+        sch.deallocate(new_T0).execute();
+    } 
 
-    // Cleanup
     tamm::finalize();
     MPI_Finalize();
-
     return 0;
 }
