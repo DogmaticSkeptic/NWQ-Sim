@@ -935,15 +935,36 @@ namespace NWQSim
                     std::cout << "[RANK " << rank << "]   - I AM THE OWNER (" << meta.original_rank
                               << "). Putting data for qubits (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
                     
-                    // --- DIAGNOSTIC: Print the data being transferred ---
                     print_buffer_diag("PUTTING", meta.q0, result_data.new_T0_data);
                     print_buffer_diag("PUTTING", meta.q1, result_data.new_T1_data);
         
                     tamm::span<Cplx> t0_span{result_data.new_T0_data};
                     tamm::span<Cplx> t1_span{result_data.new_T1_data};
         
-                    new_T0_ref.put(*(new_T0_ref.loop_nest().begin()), t0_span);
-                    new_T1_ref.put(*(new_T1_ref.loop_nest().begin()), t1_span);
+                    // ####################################################################
+                    // #                        BUG FIX IMPLEMENTED HERE                    #
+                    // ####################################################################
+                    //
+                    // The original code incorrectly used the `put(BlockID, span)` overload by passing
+                    // `*(loop_nest.begin())`. This attempts to write the entire tensor's data into a
+                    // single block, leading to data truncation and incorrect final states.
+                    //
+                    // The correct approach for a dense, single-block tensor is to use the
+                    // `put(TiledIndexVec, span)` overload. This writes the data starting from a specific
+                    // coordinate in the tensor's global index space. For our tensors, which represent the
+                    // entire state on a single block, the starting coordinate is {0,0,0}.
+        
+                    // Create a starting index vector {0, 0, 0} for the 3-dimensional MPS tensors.
+                    tamm::TiledIndexVec start_index(3, 0);
+        
+                    // Issue the put calls with the correct starting index. This ensures the entire
+                    // buffer from the span is written into the tensor correctly.
+                    new_T0_ref.put(start_index, t0_span);
+                    new_T1_ref.put(start_index, t1_span);
+                    
+                    // ####################################################################
+                    // #                          END OF FIX                              #
+                    // ####################################################################
                     
                     std::cout << "[RANK " << rank << "]   - Put issued for (" << meta.q0 << ", " << meta.q1 << ")." << std::endl;
                 }
@@ -961,7 +982,6 @@ namespace NWQSim
         
             std::cout << "[RANK " << rank << "] << Exiting apply_collective_updates." << std::endl;
         }
-
         // In TN_TAMM class
         LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16> &U4, IdxType q0, IdxType q1)
         {
