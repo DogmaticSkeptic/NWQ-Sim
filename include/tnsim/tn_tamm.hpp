@@ -1150,7 +1150,7 @@ namespace NWQSim
             return result;
         }
 
-        // High-performance randomized SVD using cusolverDnZgesvdr
+        // High-performance randomized SVD using cusolverDnXgesvdr
         void gpu_randomized_svd(
             const Cplx* A_h, int m, int n, int k_rank,
             std::vector<double>& S,
@@ -1161,22 +1161,16 @@ namespace NWQSim
             const int lda = m;
             const int ldu = m;
             const int ldv = n;
-
-            // k is the target rank we want to compute.
             const int k = k_rank;
-            // p is an oversampling parameter for better accuracy. A value of 10-20 is standard.
             const int p = 20;
-            // The algorithm internally works with a slightly larger rank l.
             const int l = k + p;
-
-            // A seed for the random number generator used by the algorithm.
             unsigned long long seed = 12345;
 
             // --- Device Memory Allocation ---
             cuDoubleComplex* d_A = nullptr;
             double* d_S = nullptr;
             cuDoubleComplex* d_U = nullptr;
-            cuDoubleComplex* d_V = nullptr; // gesvdr computes V
+            cuDoubleComplex* d_V = nullptr;
             cuDoubleComplex* d_work = nullptr;
             int* d_info = nullptr;
 
@@ -1194,20 +1188,20 @@ namespace NWQSim
 
             // --- SVD Execution using the 'gesvdr' API ---
             int lwork = 0;
-            // 1. Query for workspace size
-            cusolverDnZgesvdr_bufferSize(
+            // 1. Query for workspace size - CORRECTED to use 'X'
+            cusolverDnXgesvdr_bufferSize(
                 cu_ctx_.solver, m, n, k, &lwork);
 
             cudaMalloc((void**)&d_work, sizeof(cuDoubleComplex) * lwork);
 
-            // 2. Perform the Randomized SVD
-            cusolverDnZgesvdr(
+            // 2. Perform the Randomized SVD - CORRECTED to use 'X'
+            cusolverDnXgesvdr(
                 cu_ctx_.solver, m, n, k, p,
                 d_A, lda,
                 seed,
-                d_S,      // Output: Singular values (size k)
-                d_U, ldu, // Output: Left singular vectors (m x k)
-                d_V, ldv, // Output: Right singular vectors (n x k)
+                d_S,
+                d_U, ldu,
+                d_V, ldv,
                 d_work, lwork, d_info);
 
             cudaStreamSynchronize(cu_ctx_.stream);
@@ -1222,7 +1216,6 @@ namespace NWQSim
             cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * ldv * k, cudaMemcpyDeviceToHost);
 
             // --- Post-processing: Transpose and build final matrices ---
-            // Transpose U from column-major to row-major
             U_row.resize(m * k);
             for (int i = 0; i < m; ++i) {
                 for (int j = 0; j < k; ++j) {
@@ -1230,7 +1223,6 @@ namespace NWQSim
                 }
             }
             
-            // Build V^T (conjugate transpose of V)
             VT_row.resize(k * n);
             for (int i = 0; i < k; ++i) {
                 for (int j = 0; j < n; ++j) {
