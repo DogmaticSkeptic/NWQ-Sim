@@ -76,6 +76,27 @@ namespace NWQSim
         int original_rank;
     };
 
+    struct CuCtx {
+        cusolverDnHandle_t solver = nullptr;
+        cudaStream_t stream = nullptr;
+        gesvdjInfo_t jp = nullptr;
+        int lwork_jac = 0;
+        cuDoubleComplex* d_work_jac = nullptr;
+
+        CuCtx() {
+            cusolverDnCreate(&solver);
+            cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+            cusolverDnSetStream(solver, stream);
+            cusolverDnCreateGesvdjInfo(&jp);
+        }
+        ~CuCtx() {
+            if(d_work_jac) cudaFree(d_work_jac);
+            if(jp) cusolverDnDestroyGesvdjInfo(jp);
+            if(solver) cusolverDnDestroy(solver);
+            if(stream) cudaStreamDestroy(stream);
+        }
+    };
+
 
     using Eigen::Index;
     class TN_TAMM : public QuantumState
@@ -382,6 +403,7 @@ namespace NWQSim
         std::vector<tamm::TiledIndexSpace> phys_tis;
         std::vector<tamm::Tensor<Cplx>> mps_tensors;
         IdxType* result = nullptr;
+        CuCtx cu_ctx_;
 
         virtual void simulation_kernel(const std::vector<SVGate>& gates)
         {
@@ -627,6 +649,96 @@ namespace NWQSim
                 global_tensor.put(blockid, block_buf);
             }
         }
+
+        void apply_collective_updates(std::vector<LocalGateResult>& local_results)
+        {
+            int rank = pg.rank().value();
+        
+            // gather metadata
+            auto all_metadata = allgather_metadata(local_results);
+            tamm::Scheduler sch_global{ec};
+        
+            // deallocate old tensors and update bond dimensions
+            std::set<IdxType> deallocated_sites;
+            for (const auto& meta : all_metadata)
+            {
+                if (!meta.is_valid) continue;
+        
+                if (deallocated_sites.find(meta.q0) == deallocated_sites.end())
+                {
+                    sch_global.deallocate(mps_tensors[meta.q0]);
+                    deallocated_sites.insert(meta.q0);
+                }
+        
+                if (meta.q1 != -1 && deallocated_sites.find(meta.q1) == deallocated_sites.end())
+                {
+                    sch_global.deallocate(mps_tensors[meta.q1]);
+                    deallocated_sites.insert(meta.q1);
+                }
+        
+                if (meta.q1 != -1)
+                {
+                    bond_dims[meta.q0 + 1] = meta.new_bond_dim;
+                    tamm::IndexSpace is_new_bond{tamm::range(meta.new_bond_dim)};
+                    bond_tis[meta.q0 + 1] = tamm::TiledIndexSpace(is_new_bond, block_size);
+                }
+            }
+        
+            // allocate new tensors
+            std::map<IdxType, tamm::Tensor<Cplx>> site_to_new_tensor;
+            for (const auto& site : deallocated_sites)
+            {
+                site_to_new_tensor.emplace(
+                    site,
+                    tamm::Tensor<Cplx>{bond_tis[site], phys_tis[site], bond_tis[site + 1]}
+                );
+                site_to_new_tensor.at(site).set_dense();
+                sch_global.allocate(site_to_new_tensor.at(site));
+            }
+        
+            sch_global.execute(exec_hw);
+        
+            // populate tensors with results
+            int local_result_idx = 0;
+            for (const auto& meta : all_metadata)
+            {
+                if (!meta.is_valid) continue;
+        
+                if (rank == meta.original_rank)
+                {
+                    auto& result_data = local_results[local_result_idx++];
+                    auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
+        
+                    std::vector<size_t> t0_full_dims = {
+                        (size_t)bond_dims[meta.q0],
+                        (size_t)phys_dims[meta.q0],
+                        (size_t)bond_dims[meta.q0 + 1]
+                    };
+                    populate_tensor_from_local_data(new_T0_ref, result_data.new_T0_data, t0_full_dims);
+        
+                    if (meta.q1 != -1)
+                    {
+                        auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
+                        std::vector<size_t> t1_full_dims = {
+                            (size_t)bond_dims[meta.q1],
+                            (size_t)phys_dims[meta.q1],
+                            (size_t)bond_dims[meta.q1 + 1]
+                        };
+                        populate_tensor_from_local_data(new_T1_ref, result_data.new_T1_data, t1_full_dims);
+                    }
+                }
+            }
+        
+            // synchronize ranks
+            pg.barrier();
+        
+            // update MPS state vector
+            for (auto const& [site, new_tensor] : site_to_new_tensor)
+            {
+                mps_tensors[site] = new_tensor;
+            }
+        }
+
 
         LocalGateResult C2_GATE_COMPUTE(const std::array<Cplx, 16>& U4, IdxType q0, IdxType q1)
         {
