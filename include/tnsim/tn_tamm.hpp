@@ -1160,7 +1160,7 @@ namespace NWQSim
             //std::cout << "[RANK " << rank << "] ---> gpu_svd_jacobi: Entered. Matrix dimensions (m, n): (" << m << ", " << n << ")." << std::endl;
 
             cusolverDnXgesvdjSetTolerance(cu_ctx_.jp, 1e-3);
-            cusolverDnXgesvdjSetMaxSweeps(cu_ctx_.jp, 25);
+            cusolverDnXgesvdjSetMaxSweeps(cu_ctx_.jp, 5);
 
             int lda = m;
             int ldu = m;
