@@ -1159,7 +1159,7 @@ namespace NWQSim
             int rank = pg.rank().value();
             //std::cout << "[RANK " << rank << "] ---> gpu_svd_jacobi: Entered. Matrix dimensions (m, n): (" << m << ", " << n << ")." << std::endl;
 
-            cusolverDnXgesvdjSetTolerance(cu_ctx_.jp, 1e-4);
+            cusolverDnXgesvdjSetTolerance(cu_ctx_.jp, 1e-3);
             cusolverDnXgesvdjSetMaxSweeps(cu_ctx_.jp, 25);
 
             int lda = m;
