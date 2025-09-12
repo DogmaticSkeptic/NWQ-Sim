@@ -855,68 +855,57 @@ namespace NWQSim
             return all_metadata;
         }
         
+        // ADD THIS HELPER FUNCTION INSIDE THE TN_TAMM CLASS
+        void populate_tensor_from_local_data(
+            tamm::Tensor<Cplx>& global_tensor,
+            const std::vector<Cplx>& local_data,
+            const std::vector<size_t>& full_dims)
+        {
+            int rank = pg.rank().value();
+            std::cout << "[RANK " << rank << "] >> Populating global tensor from local data." << std::endl;
+        
+            // Loop over every block in the destination tensor
+            for (const auto& blockid : global_tensor.loop_nest()){
+                
+                // Get the dimensions and global offsets for this specific block
+                auto block_dims = global_tensor.block_dims(blockid);
+                auto block_offsets = global_tensor.block_offsets(blockid);
+                size_t block_size = global_tensor.block_size(blockid);
+        
+                // Create a temporary local buffer for this block's data
+                std::vector<Cplx> block_buf(block_size);
+        
+                // Manually pack the data from the full local tensor into the block buffer
+                size_t c = 0;
+                // This assumes a 3D tensor, which is correct for MPS
+                for (size_t i = block_offsets[0]; i < block_offsets[0] + block_dims[0]; ++i) {
+                    for (size_t j = block_offsets[1]; j < block_offsets[1] + block_dims[1]; ++j) {
+                        for (size_t k = block_offsets[2]; k < block_offsets[2] + block_dims[2]; ++k) {
+                            // Calculate the index into the flat local_data vector
+                            size_t source_idx = i * (full_dims[1] * full_dims[2]) + j * full_dims[2] + k;
+                            if (source_idx < local_data.size()) {
+                                 block_buf[c] = local_data[source_idx];
+                            }
+                            c++;
+                        }
+                    }
+                }
+                
+                // Put the correctly sized and packed buffer into the correct block
+                global_tensor.put(blockid, block_buf);
+            }
+            std::cout << "[RANK " << rank << "] >> Finished populating global tensor." << std::endl;
+        }
+        
+        
+        // REPLACE your existing apply_collective_updates with this one
         void apply_collective_updates(std::vector<LocalGateResult>& local_results)
         {
             int rank = pg.rank().value();
-            int num_ranks = pg.size().value();
-        
-            // =================================================================================
-            // ======= DIAGNOSTIC PRINT: MPS STATE BEFORE UPDATE (FROM EACH RANK) ==============
-            // =================================================================================
-            for (int r = 0; r < num_ranks; ++r) {
-                pg.barrier();
-                if (rank == r) {
-                    std::cout << "\n--------------------------------------------------------------------------" << std::endl;
-                    std::cout << "[RANK " << rank << "] MPS State BEFORE apply_collective_updates:" << std::endl;
-                    for (IdxType site = 0; site < n_qubits; ++site) {
-                        auto& T = mps_tensors[site];
-                        auto& dist = T.distribution();
-                        bool has_local_data = false;
-                        // Check if the current rank owns any part of this tensor
-                        for (const auto& blockid : T.loop_nest()) {
-                            if (dist.locate(blockid).first == pg.rank()) {
-                                has_local_data = true;
-                                break;
-                            }
-                        }
-        
-                        if (has_local_data) {
-                            IdxType Dl = bond_dims[site];
-                            IdxType Dp = phys_dims[site];
-                            IdxType Dr = bond_dims[site + 1];
-                            Cplx* hostbuf = T.access_local_buf();
-                            printf("[RANK %d] --- Tensor T_%lld (Local Data) ---\n", rank, site);
-                            printf("[RANK %d] Dimensions: [l=%lld, p=%lld, r=%lld]\n", rank, Dl, Dp, Dr);
-                            size_t idx = 0;
-                            for (IdxType l = 0; l < Dl; ++l) {
-                                printf("[RANK %d]   l=%lld:\n", rank, l);
-                                for (IdxType p = 0; p < Dp; ++p) {
-                                    printf("[RANK %d]     p=%lld: [ ", rank, p);
-                                    for (IdxType r = 0; r < Dr; ++r) {
-                                        double real_part = std::abs(hostbuf[idx].real()) < 1e-10 ? 0.0 : hostbuf[idx].real();
-                                        double imag_part = std::abs(hostbuf[idx].imag()) < 1e-10 ? 0.0 : hostbuf[idx].imag();
-                                        printf("(%.3f, %.3f) ", real_part, imag_part);
-                                        idx++;
-                                    }
-                                    printf("]\n");
-                                }
-                            }
-                        } else {
-                            printf("[RANK %d] --- Tensor T_%lld (No Local Data) ---\n", rank, site);
-                        }
-                    }
-                     std::cout << "--------------------------------------------------------------------------" << std::endl;
-                }
-            }
-            pg.barrier();
-            // =================================================================================
-        
-        
             std::cout << "[RANK " << rank << "] >> ENTERING apply_collective_updates with "
                       << local_results.size() << " local results." << std::endl;
         
             // PHASE 1: Gather metadata from all ranks.
-            std::cout << "[RANK " << rank << "] PHASE 1: Calling allgather_metadata..." << std::endl;
             auto all_metadata = allgather_metadata(local_results);
             std::cout << "[RANK " << rank << "] PHASE 1: Finished allgather_metadata. Found "
                       << all_metadata.size() << " total updates." << std::endl;
@@ -953,10 +942,11 @@ namespace NWQSim
                 sch_global.allocate(site_to_new_tensor.at(site));
             }
         
-            std::cout << "[RANK " << rank << "] DEBUG: About to call sch_global.execute() for memory management." << std::endl;
+            auto start_res_mgmt = std::chrono::high_resolution_clock::now();
             sch_global.execute(exec_hw);
-            std::cout << "[RANK " << rank << "] DEBUG: Finished sch_global.execute() for memory management." << std::endl;
-        
+            auto end_res_mgmt = std::chrono::high_resolution_clock::now();
+            total_resource_management_time += (end_res_mgmt - start_res_mgmt);
+            std::cout << "[RANK " << rank << "] PHASE 2/3: Finished deallocations and allocations." << std::endl;
         
             // PHASE 4: Owner ranks perform one-sided PUTs to populate the new tensors.
             std::cout << "[RANK " << rank << "] PHASE 4: Entering loop to perform one-sided PUTs..." << std::endl;
@@ -974,87 +964,39 @@ namespace NWQSim
                     auto& new_T0_ref = site_to_new_tensor.at(meta.q0);
                     auto& new_T1_ref = site_to_new_tensor.at(meta.q1);
         
-                    tamm::span<Cplx> t0_span{result_data.new_T0_data};
-                    tamm::span<Cplx> t1_span{result_data.new_T1_data};
+                    // Get the full dimensions of the local data to help with indexing
+                    std::vector<size_t> t0_full_dims = {
+                        (size_t)bond_dims[meta.q0], 
+                        (size_t)phys_dims[meta.q0], 
+                        (size_t)meta.new_bond_dim
+                    };
+                    std::vector<size_t> t1_full_dims = {
+                        (size_t)meta.new_bond_dim, 
+                        (size_t)phys_dims[meta.q1], 
+                        (size_t)bond_dims[meta.q1 + 1]
+                    };
         
-                    tamm::IndexVector start_index{0, 0, 0};
-        
-                    print_buffer_diag("About to PUT", meta.q0, result_data.new_T0_data);
-                    print_buffer_diag("About to PUT", meta.q1, result_data.new_T1_data);
-        
-                    new_T0_ref.put(start_index, t0_span);
-                    new_T1_ref.put(start_index, t1_span);
-        
-                    std::cout << "[RANK " << rank << "] DEBUG: PUT operation for qubits (" << meta.q0
-                              << ", " << meta.q1 << ") has been issued." << std::endl;
+                    auto start_put = std::chrono::high_resolution_clock::now();
+                    populate_tensor_from_local_data(new_T0_ref, result_data.new_T0_data, t0_full_dims);
+                    populate_tensor_from_local_data(new_T1_ref, result_data.new_T1_data, t1_full_dims);
+                    auto end_put = std::chrono::high_resolution_clock::now();
+                    total_data_movement_time += (end_put - start_put);
                 }
             }
             std::cout << "[RANK " << rank << "] PHASE 4: Finished loop for one-sided PUTs." << std::endl;
-        
-        
-            std::cout << "[RANK " << rank << "] DEBUG: Reaching pg.barrier()..." << std::endl;
+            
+            // -- SYNCHRONIZATION --
+            auto start_sync = std::chrono::high_resolution_clock::now();
             pg.barrier();
-            std::cout << "[RANK " << rank << "] DEBUG: Passed pg.barrier()." << std::endl;
-        
-        
+            auto end_sync = std::chrono::high_resolution_clock::now();
+            total_synchronization_time += (end_sync - start_sync);
+            
             // PHASE 5: Update the main MPS state vector.
             std::cout << "[RANK " << rank << "] PHASE 5: Updating mps_tensors with new handles." << std::endl;
             for(auto const& [site, new_tensor] : site_to_new_tensor) {
                 mps_tensors[site] = new_tensor;
             }
-        
-            // =================================================================================
-            // ======= DIAGNOSTIC PRINT: MPS STATE AFTER UPDATE (FROM EACH RANK) ===============
-            // =================================================================================
-            for (int r = 0; r < num_ranks; ++r) {
-                pg.barrier();
-                if (rank == r) {
-                    std::cout << "\n--------------------------------------------------------------------------" << std::endl;
-                    std::cout << "[RANK " << rank << "] MPS State AFTER apply_collective_updates:" << std::endl;
-                    for (IdxType site = 0; site < n_qubits; ++site) {
-                        auto& T = mps_tensors[site];
-                        auto& dist = T.distribution();
-                        bool has_local_data = false;
-                        // Check if the current rank owns any part of this tensor
-                        for (const auto& blockid : T.loop_nest()) {
-                            if (dist.locate(blockid).first == pg.rank()) {
-                                has_local_data = true;
-                                break;
-                            }
-                        }
-        
-                        if (has_local_data) {
-                            IdxType Dl = bond_dims[site];
-                            IdxType Dp = phys_dims[site];
-                            IdxType Dr = bond_dims[site + 1];
-                            Cplx* hostbuf = T.access_local_buf();
-                            printf("[RANK %d] --- Tensor T_%lld (Local Data) ---\n", rank, site);
-                            printf("[RANK %d] Dimensions: [l=%lld, p=%lld, r=%lld]\n", rank, Dl, Dp, Dr);
-                            size_t idx = 0;
-                            for (IdxType l = 0; l < Dl; ++l) {
-                                printf("[RANK %d]   l=%lld:\n", rank, l);
-                                for (IdxType p = 0; p < Dp; ++p) {
-                                    printf("[RANK %d]     p=%lld: [ ", rank, p);
-                                    for (IdxType r = 0; r < Dr; ++r) {
-                                        double real_part = std::abs(hostbuf[idx].real()) < 1e-10 ? 0.0 : hostbuf[idx].real();
-                                        double imag_part = std::abs(hostbuf[idx].imag()) < 1e-10 ? 0.0 : hostbuf[idx].imag();
-                                        printf("(%.3f, %.3f) ", real_part, imag_part);
-                                        idx++;
-                                    }
-                                    printf("]\n");
-                                }
-                            }
-                        } else {
-                            printf("[RANK %d] --- Tensor T_%lld (No Local Data) ---\n", rank, site);
-                        }
-                    }
-                     std::cout << "--------------------------------------------------------------------------" << std::endl;
-                }
-            }
-            pg.barrier();
-            // =================================================================================
-        
-        
+            
             std::cout << "[RANK " << rank << "] << EXITING apply_collective_updates." << std::endl;
         }
 
