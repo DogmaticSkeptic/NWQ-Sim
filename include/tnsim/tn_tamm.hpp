@@ -946,8 +946,8 @@ namespace NWQSim
                     new_T1_local.put(*(new_T1_local.loop_nest().begin()), result_data.new_T1_data);
                     
                     // **FIXED**: Schedule a full copy from the local tensor to the global tensor.
-                    sch_global_ (new_T0_global() = new_T0_local());
-                    sch_global_ (new_T1_global() = new_T1_local());
+                    sch_global(new_T0_global() = new_T0_local());
+                    sch_global(new_T1_global() = new_T1_local());
         
                     // Deallocate the temporary local tensors
                     sch_local_.deallocate(new_T0_local, new_T1_local).execute(exec_hw);
@@ -956,7 +956,7 @@ namespace NWQSim
             
             // Execute all the scheduled copy operations
             auto start_put = std::chrono::high_resolution_clock::now();
-            sch_global_.execute(exec_hw);
+            sch_global.execute(exec_hw); // **FIXED**
             auto end_put = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_put - start_put);
         
