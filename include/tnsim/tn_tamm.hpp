@@ -1069,8 +1069,7 @@ namespace NWQSim
             return result;
         }
 
-        // REPLACE your existing C1_GATE_COMPUTE function with this new, heavily instrumented version.
-        // It is now a direct 1-qubit analogue of the working C2_GATE_COMPUTE function.
+        // REPLACE your C1_GATE_COMPUTE function with this final version.
         LocalGateResult C1_GATE_COMPUTE(const SVGate& g)
         {
             int rank = pg.rank().value();
@@ -1104,7 +1103,6 @@ namespace NWQSim
             auto end_get = std::chrono::high_resolution_clock::now();
             total_data_movement_time += (end_get - start_get);
         
-            // *** DIAGNOSTIC PRINT 1: Show the data that was received by the worker rank ***
             print_local_tensor_data(rank, "C1 T_in_local (Received)", T_in_local);
         
             // 4. Populate the local gate matrix
@@ -1113,7 +1111,6 @@ namespace NWQSim
             Cplx* g_local_buf = G_local.access_local_buf();
             std::memcpy(g_local_buf, U.data(), 4 * sizeof(Cplx));
         
-            // *** DIAGNOSTIC PRINT 2: Show the gate matrix being applied ***
             print_local_tensor_data(rank, "C1 G_local (Gate Matrix)", G_local);
         
             // 5. Perform the contraction using the LOCAL scheduler
@@ -1122,24 +1119,23 @@ namespace NWQSim
             auto end_contraction = std::chrono::high_resolution_clock::now();
             total_contraction_time += (end_contraction - start_contraction);
         
-            // *** DIAGNOSTIC PRINT 3: Show the result of the local contraction ***
             print_local_tensor_data(rank, "C1 T_new_local (Result)", T_new_local);
         
-            // 6. Get the result data from the local result tensor into a flat std::vector
+            // 6. *** THE FIX ***
+            // Get the result data by directly accessing the local buffer, avoiding the buggy 'get'.
             std::vector<Cplx> t_out_data(T_new_local.size());
-            T_new_local.get(*(T_new_local.loop_nest().begin()), t_out_data);
+            Cplx* result_buffer_ptr = T_new_local.access_local_buf();
+            std::memcpy(t_out_data.data(), result_buffer_ptr, t_out_data.size() * sizeof(Cplx));
             
-            // *** DIAGNOSTIC PRINT 4: Show the flat vector being returned ***
-            // This is the only place we need the free function, so let's just do it inline for safety.
             std::cout << "[RANK " << rank << "] C1 t_out_data (Returning): [ ";
             for (const auto& val : t_out_data) {
-                std::cout << val.real() << " ";
+                std::cout << "(" << val.real() << "," << val.imag() << ") ";
             }
             std::cout << "]" << std::endl;
         
             // 7. Clean up local resources
             start_res_mgmt = std::chrono::high_resolution_clock::now();
-            sch_local_.deallocate(T_in_local, G_local, T_new_local).execute(exec_hw);
+            sch_local_.deallocate(T_in_local, T_new_local, G_local).execute(exec_hw);
             end_res_mgmt = std::chrono::high_resolution_clock::now();
             total_resource_management_time += (end_res_mgmt - start_res_mgmt);
         
@@ -1147,8 +1143,8 @@ namespace NWQSim
             LocalGateResult result;
             result.is_valid = true;
             result.q0 = q_idx;
-            result.q1 = -1; // Use an invalid index to signify a 1-qubit update
-            result.new_bond_dim = bond_dims[q_idx + 1]; // Bond dim doesn't change
+            result.q1 = -1; 
+            result.new_bond_dim = bond_dims[q_idx + 1]; 
             result.new_T0_data = std::move(t_out_data);
             result.original_rank = rank;
             
