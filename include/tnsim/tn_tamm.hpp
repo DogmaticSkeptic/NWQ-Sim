@@ -1150,90 +1150,95 @@ namespace NWQSim
             return result;
         }
 
-        void gpu_svd_jacobi(
-            const Cplx* A_h, int m, int n,
+        // High-performance randomized SVD using cusolverDnZgesvdr
+        void gpu_randomized_svd(
+            const Cplx* A_h, int m, int n, int k_rank,
             std::vector<double>& S,
             std::vector<Cplx>& U_row,
             std::vector<Cplx>& VT_row)
         {
+            // --- Configuration for Randomized SVD ---
             const int lda = m;
             const int ldu = m;
             const int ldv = n;
-            const int k = std::min(std::min(m, n), static_cast<int>(max_bond_dim > 0 ? max_bond_dim : std::min(m, n)));
-        
+
+            // k is the target rank we want to compute.
+            const int k = k_rank;
+            // p is an oversampling parameter for better accuracy. A value of 10-20 is standard.
+            const int p = 20;
+            // The algorithm internally works with a slightly larger rank l.
+            const int l = k + p;
+
+            // A seed for the random number generator used by the algorithm.
+            unsigned long long seed = 12345;
+
+            // --- Device Memory Allocation ---
             cuDoubleComplex* d_A = nullptr;
             double* d_S = nullptr;
             cuDoubleComplex* d_U = nullptr;
-            cuDoubleComplex* d_V = nullptr;
+            cuDoubleComplex* d_V = nullptr; // gesvdr computes V
             cuDoubleComplex* d_work = nullptr;
             int* d_info = nullptr;
-        
-            cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * (size_t)lda * (size_t)n);
-            cudaMalloc((void**)&d_S, sizeof(double) * (size_t)k);
-            cudaMalloc((void**)&d_U, sizeof(cuDoubleComplex) * (size_t)ldu * (size_t)k);
-            cudaMalloc((void**)&d_V, sizeof(cuDoubleComplex) * (size_t)ldv * (size_t)k);
+
+            cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * lda * n);
+            cudaMalloc((void**)&d_S, sizeof(double) * k);
+            cudaMalloc((void**)&d_U, sizeof(cuDoubleComplex) * ldu * k);
+            cudaMalloc((void**)&d_V, sizeof(cuDoubleComplex) * ldv * k);
             cudaMalloc((void**)&d_info, sizeof(int));
-        
+
             cudaMemcpyAsync(d_A,
                             reinterpret_cast<const cuDoubleComplex*>(A_h),
-                            sizeof(cuDoubleComplex) * (size_t)lda * (size_t)n,
+                            sizeof(cuDoubleComplex) * lda * n,
                             cudaMemcpyHostToDevice,
                             cu_ctx_.stream);
-        
-            gesvdaInfo_t ap = nullptr;
-            cusolverDnCreateGesvdaInfo(&ap);
-            cusolverDnXgesvdaSetTolerance(ap, 1e-3);
-            cusolverDnXgesvdaSetMaxSweeps(ap, 50);
-        
+
+            // --- SVD Execution using the 'gesvdr' API ---
             int lwork = 0;
-            cusolverDnZgesvda_bufferSize(
-                cu_ctx_.solver,
-                CUSOLVER_EIG_MODE_VECTOR,
-                m, n, k,
+            // 1. Query for workspace size
+            cusolverDnZgesvdr_bufferSize(
+                cu_ctx_.solver, m, n, k, &lwork);
+
+            cudaMalloc((void**)&d_work, sizeof(cuDoubleComplex) * lwork);
+
+            // 2. Perform the Randomized SVD
+            cusolverDnZgesvdr(
+                cu_ctx_.solver, m, n, k, p,
                 d_A, lda,
-                d_S,
-                d_U, ldu,
-                d_V, ldv,
-                &lwork,
-                ap);
-        
-            cudaMalloc((void**)&d_work, sizeof(cuDoubleComplex) * (size_t)lwork);
-        
-            cusolverDnZgesvda(
-                cu_ctx_.solver,
-                CUSOLVER_EIG_MODE_VECTOR,
-                m, n, k,
-                d_A, lda,
-                d_S,
-                d_U, ldu,
-                d_V, ldv,
-                d_work, lwork,
-                d_info,
-                ap);
-        
+                seed,
+                d_S,      // Output: Singular values (size k)
+                d_U, ldu, // Output: Left singular vectors (m x k)
+                d_V, ldv, // Output: Right singular vectors (n x k)
+                d_work, lwork, d_info);
+
             cudaStreamSynchronize(cu_ctx_.stream);
-        
-            S.resize((size_t)k);
-            std::vector<Cplx> U_col((size_t)ldu * (size_t)k);
-            std::vector<Cplx> V_col((size_t)ldv * (size_t)k);
-        
-            cudaMemcpy(S.data(), d_S, sizeof(double) * (size_t)k, cudaMemcpyDeviceToHost);
-            cudaMemcpy(U_col.data(), d_U, sizeof(Cplx) * (size_t)ldu * (size_t)k, cudaMemcpyDeviceToHost);
-            cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * (size_t)ldv * (size_t)k, cudaMemcpyDeviceToHost);
-        
-            U_row.resize((size_t)m * (size_t)k);
-            for (int i = 0; i < m; ++i)
-                for (int j = 0; j < k; ++j)
-                    U_row[(size_t)i * (size_t)k + (size_t)j] =
-                        U_col[(size_t)i + (size_t)j * (size_t)ldu];
-        
-            VT_row.resize((size_t)k * (size_t)n);
-            for (int i = 0; i < k; ++i)
-                for (int j = 0; j < n; ++j)
-                    VT_row[(size_t)i * (size_t)n + (size_t)j] =
-                        std::conj(V_col[(size_t)j + (size_t)i * (size_t)ldv]);
-        
-            cusolverDnDestroyGesvdaInfo(ap);
+            
+            // --- Copy Results from Device to Host ---
+            S.resize(k);
+            std::vector<Cplx> U_col(ldu * k);
+            std::vector<Cplx> V_col(ldv * k);
+
+            cudaMemcpy(S.data(), d_S, sizeof(double) * k, cudaMemcpyDeviceToHost);
+            cudaMemcpy(U_col.data(), d_U, sizeof(Cplx) * ldu * k, cudaMemcpyDeviceToHost);
+            cudaMemcpy(V_col.data(), d_V, sizeof(Cplx) * ldv * k, cudaMemcpyDeviceToHost);
+
+            // --- Post-processing: Transpose and build final matrices ---
+            // Transpose U from column-major to row-major
+            U_row.resize(m * k);
+            for (int i = 0; i < m; ++i) {
+                for (int j = 0; j < k; ++j) {
+                    U_row[i * k + j] = U_col[j * ldu + i];
+                }
+            }
+            
+            // Build V^T (conjugate transpose of V)
+            VT_row.resize(k * n);
+            for (int i = 0; i < k; ++i) {
+                for (int j = 0; j < n; ++j) {
+                    VT_row[i * n + j] = std::conj(V_col[j * k + i]);
+                }
+            }
+
+            // --- Cleanup ---
             cudaFree(d_work);
             cudaFree(d_info);
             cudaFree(d_V);
@@ -1250,22 +1255,17 @@ namespace NWQSim
         {
             int rank = pg.rank().value();
             
-            // --- Start Timing SVD ---
             auto start_svd = std::chrono::high_resolution_clock::now();
         
-            // 1. Extract dimensions from the input tensor
+            // 1. Extract dimensions
             const IdxType phys_dim = 2;
             IdxType Dl = M2_local.tiled_index_spaces()[0].index_space().num_indices();
             IdxType Dr = M2_local.tiled_index_spaces()[3].index_space().num_indices();
-        
             int m = Dl * phys_dim;
             int n = phys_dim * Dr;
         
-            // 2. Get a pointer to the local, row-major TAMM tensor data.
+            // 2. Reshape TAMM tensor data from row-major to column-major for cuSOLVER.
             Cplx* M2_hostbuf_rowmajor = M2_local.access_local_buf();
-            
-            // 3. Reshape the row-major TAMM data into a column-major std::vector for cuSOLVER.
-            //    This is the critical transposition step.
             std::vector<Cplx> M2_col_major(m * n);
             size_t c = 0;
             for (size_t l = 0; l < Dl; ++l) {
@@ -1274,19 +1274,22 @@ namespace NWQSim
                         for (size_t r = 0; r < Dr; ++r, ++c) {
                             size_t row = l * phys_dim + p0;
                             size_t col = p1 * Dr + r;
-                            // Write to the column-major vector
                             M2_col_major[col * m + row] = M2_hostbuf_rowmajor[c];
                         }
                     }
                 }
             }
             
-            // 4. Perform the SVD on the GPU using the correctly formatted data.
+            // 3. Perform the SVD.
+            // **MODIFIED**: We now decide the target rank 'k' BEFORE the SVD call.
+            int target_rank = std::min({(int)max_bond_dim, m, n});
+            
             std::vector<double> S_vals;
             std::vector<Cplx> U_mat_rowmajor, VT_mat_rowmajor;
-            gpu_svd_jacobi(M2_col_major.data(), m, n, S_vals, U_mat_rowmajor, VT_mat_rowmajor);
+            gpu_randomized_svd(M2_col_major.data(), m, n, target_rank, S_vals, U_mat_rowmajor, VT_mat_rowmajor);
         
-            // 5. Truncate based on singular value cutoff and max bond dimension.
+            // 4. Truncate based on singular value cutoff.
+            //    (We no longer need to truncate by max_bond_dim, as the SVD already did it).
             std::vector<IdxType> keep_indices;
             keep_indices.reserve(S_vals.size());
             for (size_t i = 0; i < S_vals.size(); ++i) {
@@ -1294,25 +1297,22 @@ namespace NWQSim
                     keep_indices.push_back(i);
                 }
             }
-            IdxType chi = std::min<IdxType>(max_bond_dim, IdxType(keep_indices.size()));
+            IdxType chi = keep_indices.size();
             if (chi == 0 && !S_vals.empty()) {
                 chi = 1; // Prevent bond dimension from ever becoming zero.
             }
         
-            if (rank == 0) { // Or the worker rank
+            if (rank == 0) {
                 std::cout << "\n[SVD DIAG RANK " << rank << "] Qubits (" << q0 << ", " << q1 
                           << "), chi=" << chi << std::endl;
                 std::cout << "  Singular values: ";
-                for (IdxType k = 0; k < chi; ++k) {
-                    std::cout << S_vals[keep_indices[k]] << " ";
-                }
+                for (IdxType k = 0; k < chi; ++k) std::cout << S_vals[keep_indices[k]] << " ";
                 std::cout << std::endl;
             }
             
-            // 6. Populate the output vectors with the data for the new tensors.
+            // 5. Populate the output vectors with the data for the new tensors.
             
-            // 6a. Populate the new left tensor data (Ti_new_data) from the truncated U matrix.
-            // U_mat_rowmajor is already in row-major form [m x k] where k=min(m,n).
+            // 5a. Populate new left tensor (Ti_new_data) from truncated U.
             Ti_new_data.resize(Dl * phys_dim * chi);
             c = 0;
             for (size_t l = 0; l < Dl; ++l) {
@@ -1325,8 +1325,7 @@ namespace NWQSim
                 }
             }
         
-            // 6b. Populate the new right tensor data (Tj_new_data) from S * Vh.
-            // VT_mat_rowmajor is already in row-major form [k x n].
+            // 5b. Populate new right tensor (Tj_new_data) from S * Vh.
             Tj_new_data.resize(chi * phys_dim * Dr);
             c = 0;
             for (size_t b = 0; b < chi; ++b) {
@@ -1339,7 +1338,6 @@ namespace NWQSim
                 }
             }
         
-            // --- End Timing SVD ---
             auto end_svd = std::chrono::high_resolution_clock::now();
             total_svd_time += (end_svd - start_svd);
             
