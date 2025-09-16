@@ -3,7 +3,12 @@
 # Load the GNU programming environment
 module load PrgEnv-gnu
 
-# Load the Cray MPICH library for MPI support (This resolves the original error)
+# Load a specific version of GCC to ensure consistency. 
+# The PrgEnv-gnu might default to a different version, so this makes it explicit.
+# NERSC often has multiple versions available.
+module load gcc
+
+# Load the Cray MPICH library for MPI support
 module load cray-mpich
 
 # Load CUDA toolkit
@@ -12,7 +17,6 @@ module load cudatoolkit
 module unload craype-accel-nvidia80
 
 # Source the baseline Perlmutter settings from the main environment directory
-# Adjust the path if you run this script from a different location.
 source ./environment/setup_perlmutter.sh
 
 # Link against dynamic libraries
@@ -37,6 +41,3 @@ export GA_PROGRESS_RANKS_DISTRIBUTION_PACKED=1
 
 export PPn=4
 
-export LD_LIBRARY_PATH=/opt/cray/pe/gcc/12.2.0/snos/lib64:$LD_LIBRARY_PATH
-export LD_PRELOAD=/opt/cray/pe/gcc/12.2.0/snos/lib64/libgcc_s.so.1:/opt/cray/pe/gcc/12.2.0/snos/lib64/libstdc++.so.6
-export CUDA_124=/opt/nvidia/hpc_sdk/Linux_x86_64/24.5/cuda/12.4
