@@ -38,8 +38,6 @@ find_package(MPI)
 find_package(OpenMP)
 find_package(XACC QUIET)
 find_package(HIP QUIET)
-find_package(LAPACK)
-find_package(BLAS)
 find_package(TAMM)
 
 get_target_property(_mpi_includes MPI::MPI_CXX INTERFACE_INCLUDE_DIRECTORIES)
@@ -90,7 +88,6 @@ if(CUDAToolkit_FOUND)
 else()
     set(nvshmem_found_str "N/A")
 endif()
-
 
 
 # Path to external ITensor installation
