@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 
-module load spack/0.22
-spack env activate cuda
-spack load slate lapackpp blaspp
-
-# Source the baseline Perlmutter settings
-source ./environment/setup_perlmutter.sh
-
-# Load/build tools needed by TAMM
+# Load the GNU programming environment
 module load PrgEnv-gnu
+
+# Load the Cray MPICH library for MPI support (This resolves the original error)
+module load cray-mpich
+
+# Load CUDA toolkit
 module load cpe-cuda
 module load cudatoolkit
 module unload craype-accel-nvidia80
 
-module load gcc
-# Link against dynamic libraries (disable static Cray libsci)
+# Source the baseline Perlmutter settings from the main environment directory
+# Adjust the path if you run this script from a different location.
+source ./environment/setup_perlmutter.sh
+
+# Link against dynamic libraries
 export CRAYPE_LINK_TYPE=dynamic
 
 # Disable MPICH's native GPU support (use OFI instead)
