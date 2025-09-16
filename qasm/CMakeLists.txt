@@ -66,13 +66,6 @@ if (TAMM_FOUND)
         list(APPEND CMAKE_BUILD_RPATH ${_cuda_libdir})
     endif()
 
-    # Keep keyword signature consistently
-    target_link_libraries(nwq_qasm PRIVATE
-        ${SLATE_LIB}
-        ${LAPACKPP_LIB}
-        ${BLASPP_LIB}
-    )
-
     if(CUDAToolkit_FOUND)
         target_link_libraries(nwq_qasm PRIVATE
             CUDA::cudart

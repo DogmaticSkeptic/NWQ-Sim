@@ -38,8 +38,6 @@ find_package(MPI)
 find_package(OpenMP)
 find_package(XACC QUIET)
 find_package(HIP QUIET)
-find_package(LAPACK)
-find_package(BLAS)
 find_package(TAMM)
 
 get_target_property(_mpi_includes MPI::MPI_CXX INTERFACE_INCLUDE_DIRECTORIES)
@@ -92,36 +90,6 @@ else()
 endif()
 
 
-# Hardcoded Spack install prefixes for Perlmutter E4S v0.22
-set(SLATE_PREFIX    /global/common/software/spackecp/perlmutter/v0.22/96029/spack/opt/spack/linux-sles15-zen3/gcc-12.3.0/slate-2023.11.05-x4dznn44tjb5l3tpl7s7uuogu3o5qfdz)
-set(LAPACKPP_PREFIX /global/common/software/spackecp/perlmutter/v0.22/96029/spack/opt/spack/linux-sles15-zen3/gcc-12.3.0/lapackpp-2023.11.05-pph2uwrfujonebbyueaptvnm3elgz77e)
-set(BLASPP_PREFIX   /global/common/software/spackecp/perlmutter/v0.22/96029/spack/opt/spack/linux-sles15-zen3/gcc-12.3.0/blaspp-2023.11.05-uffk4lufpj5ne7itkn27wcqcmj42zi5u)
-
-# Paths to headers
-set(SLATE_INC    ${SLATE_PREFIX}/include)
-set(LAPACKPP_INC ${LAPACKPP_PREFIX}/include)
-set(BLASPP_INC   ${BLASPP_PREFIX}/include)
-
-# Paths to library files
-set(SLATE_LIB    ${SLATE_PREFIX}/lib64/libslate.so)
-set(LAPACKPP_LIB ${LAPACKPP_PREFIX}/lib64/liblapackpp.so)
-set(BLASPP_LIB   ${BLASPP_PREFIX}/lib64/libblaspp.so)
-
-# Verification of paths
-foreach(path_var IN ITEMS SLATE_INC LAPACKPP_INC BLASPP_INC)
-    if (NOT EXISTS ${${path_var}})
-        message(FATAL_ERROR "Missing include directory: ${${path_var}}")
-    endif()
-endforeach()
-
-foreach(path_var IN ITEMS SLATE_LIB LAPACKPP_LIB BLASPP_LIB)
-    if (NOT EXISTS ${${path_var}})
-        message(FATAL_ERROR "Missing library file: ${${path_var}}")
-    endif()
-endforeach()
-
-# Add include directories
-include_directories(${SLATE_INC} ${LAPACKPP_INC} ${BLASPP_INC})
 # Path to external ITensor installation
 set(ITENSOR_ROOT "${CMAKE_SOURCE_DIR}/../itensor"
     CACHE PATH "Path to external iTensor installation")
