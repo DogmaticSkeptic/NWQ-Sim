@@ -3,9 +3,6 @@
 # Load the GNU programming environment
 module load PrgEnv-gnu
 
-# Load a specific version of GCC to ensure consistency. 
-# The PrgEnv-gnu might default to a different version, so this makes it explicit.
-# NERSC often has multiple versions available.
 module load gcc
 
 # Load the Cray MPICH library for MPI support
