@@ -48,6 +48,7 @@
 
 #include <fstream>
 #include <iomanip>
+#include <chrono>
 
 #include <cuda_runtime.h>
 #include <cusolverDn.h>
@@ -249,11 +250,16 @@ namespace NWQSim
             std::vector<SVGate> gates = fuse_circuit_sv(circuit);
             IdxType fused_gate_count = gates.size();
             assert(circuit->num_qubits() == n_qubits);
-        
+            const auto is_root = (pg.rank().value() == 0);
+
             pg.barrier();
             simulation_kernel(gates);
             pg.barrier();
-        
+
+            if(is_root) {
+                std::cout << "[TN_TAMM] Simulation wall time (excluding MA_GATE sampling): "
+                          << last_simulation_seconds_no_ma_ << " s" << std::endl;
+            }
         }
 
         IdxType* get_results() override
@@ -405,9 +411,16 @@ namespace NWQSim
         std::vector<tamm::Tensor<Cplx>> mps_tensors;
         IdxType* result = nullptr;
         CuCtx cu_ctx_;
+        double last_simulation_seconds_no_ma_ = 0.0;
+        double last_ma_total_seconds_ = 0.0;
+        double last_ma_canonical_seconds_ = 0.0;
+        double last_ma_sampling_seconds_ = 0.0;
 
         virtual void simulation_kernel(const std::vector<SVGate>& gates)
         {
+            auto last_checkpoint = std::chrono::steady_clock::now();
+            std::chrono::duration<double> non_ma_duration{0.0};
+
             // separate parallel and sequential gates
             std::vector<SVGate> parallel_gates;
             std::vector<SVGate> sequential_gates;
@@ -422,9 +435,9 @@ namespace NWQSim
                     sequential_gates.push_back(g);
                 }
             }
-        
+
             pg.barrier();
-        
+
             // process parallel gates
             if (!parallel_gates.empty())
             {
@@ -495,9 +508,9 @@ namespace NWQSim
                     pg.barrier();
                 }
             }
-        
+
             pg.barrier();
-        
+
             // process sequential gates
             for (const auto& g : sequential_gates)
             {
@@ -511,10 +524,16 @@ namespace NWQSim
                 }
                 else if (g.op_name == OP::MA)
                 {
+                    const auto before_ma = std::chrono::steady_clock::now();
+                    non_ma_duration += before_ma - last_checkpoint;
                     MA_GATE(g.qubit);
+                    last_checkpoint = std::chrono::steady_clock::now();
                 }
             }
-        
+
+            non_ma_duration += std::chrono::steady_clock::now() - last_checkpoint;
+            last_simulation_seconds_no_ma_ = non_ma_duration.count();
+
             pg.barrier();
         }
 
@@ -1443,11 +1462,16 @@ namespace NWQSim
                 return;
             }
 
+            const bool is_root = (pg.rank().value() == 0);
+            const auto gate_start = std::chrono::steady_clock::now();
+
             // place tensor network into a stable canonical form before sampling
             pg.barrier();
             left_canonicalize(mps_tensors);
             right_canonicalize(mps_tensors);
             pg.barrier();
+
+            const auto canonical_end = std::chrono::steady_clock::now();
 
             // create local copies of the MPS tensors so sampling touches local memory only
             struct LocalTensorView {
@@ -1626,6 +1650,19 @@ namespace NWQSim
             SAFE_FREE_HOST(results);
             SAFE_ALOC_HOST(results, sizeof(IdxType) * static_cast<size_t>(repetition));
             std::memcpy(results, gathered.data(), sizeof(IdxType) * static_cast<size_t>(repetition));
+
+            const auto gate_end = std::chrono::steady_clock::now();
+            const double total_seconds = std::chrono::duration<double>(gate_end - gate_start).count();
+            const double canonical_seconds = std::chrono::duration<double>(canonical_end - gate_start).count();
+            const double sampling_seconds = std::max(0.0, total_seconds - canonical_seconds);
+            last_ma_total_seconds_ = total_seconds;
+            last_ma_canonical_seconds_ = canonical_seconds;
+            last_ma_sampling_seconds_ = sampling_seconds;
+            if(is_root) {
+                std::cout << "[TN_TAMM] MA_GATE total wall time: " << total_seconds << " s" << std::endl;
+                std::cout << "[TN_TAMM] MA_GATE canonicalization wall time: " << canonical_seconds << " s" << std::endl;
+                std::cout << "[TN_TAMM] MA_GATE sampling wall time: " << sampling_seconds << " s" << std::endl;
+            }
         }
 
         void local_left_step(IdxType i)
