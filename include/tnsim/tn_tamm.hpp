@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdio>
 #include <sstream>
+#include <algorithm>
 
 #include <tamm/errors.hpp>
 #include <tamm/symbol.hpp>
@@ -1429,96 +1430,202 @@ namespace NWQSim
         *5) Store the final bitstring for each repetition in the results buffer. */
         virtual void MA_GATE(const IdxType repetition)
         {
-            // allocate result buffer
-            SAFE_FREE_HOST(results);
-            SAFE_ALOC_HOST(results, sizeof(IdxType) * repetition);
-            std::memset(results, 0, sizeof(IdxType) * repetition);
-        
-            // bring MPS into canonical form
+            if (repetition <= 0) {
+                SAFE_FREE_HOST(results);
+                results = nullptr;
+                return;
+            }
+
+            if (n_qubits == 0) {
+                SAFE_FREE_HOST(results);
+                SAFE_ALOC_HOST(results, sizeof(IdxType) * static_cast<size_t>(repetition));
+                std::memset(results, 0, sizeof(IdxType) * static_cast<size_t>(repetition));
+                return;
+            }
+
+            // place tensor network into a stable canonical form before sampling
+            pg.barrier();
             left_canonicalize(mps_tensors);
             right_canonicalize(mps_tensors);
-        
-            // perform measurement assignment repetitions
-            std::mt19937_64 rng{std::random_device{}()};
-            std::uniform_real_distribution<double> dist(0.0, 1.0);
-            for (IdxType rep = 0; rep < repetition; ++rep)
+            pg.barrier();
+
+            // create local copies of the MPS tensors so sampling touches local memory only
+            struct LocalTensorView {
+                IdxType Dl = 0;
+                IdxType Dr = 0;
+                std::vector<Cplx> data;
+            };
+
+            std::vector<tamm::Tensor<Cplx>> local_mps;
+            local_mps.reserve(n_qubits);
+            for (IdxType site = 0; site < n_qubits; ++site) {
+                tamm::Tensor<Cplx> local_tensor({bond_tis[site], phys_tis[site], bond_tis[site + 1]});
+                local_tensor.set_dense();
+                local_mps.emplace_back(std::move(local_tensor));
+            }
+
             {
-                IdxType packed = 0;
-                std::vector<Cplx> env(1, Cplx{1.0, 0.0});
-        
-                // sweep through all qubits
-                for (IdxType site = 0; site < n_qubits; ++site)
-                {
-                    auto& T = mps_tensors[site];
-                    IdxType Dl = bond_dims[site];
-                    IdxType Dr = bond_dims[site + 1];
-        
-                    std::vector<Cplx> env0(Dr, Cplx{0.0, 0.0});
-                    std::vector<Cplx> env1(Dr, Cplx{0.0, 0.0});
-        
-                    // unpack tensor into branch environments
-                    for (const auto& blockid : T.loop_nest())
-                    {
-                        size_t bs = T.block_size(blockid);
-                        std::vector<Cplx> hostbuf(bs);
-                        T.get(blockid, hostbuf);
-        
-                        auto dims = T.block_dims(blockid);
-                        auto offs = T.block_offsets(blockid);
-                        size_t idx = 0;
-                        for (size_t jj = 0; jj < dims[0]; ++jj)
-                        {
-                            for (size_t kk = 0; kk < dims[1]; ++kk)
-                            {
-                                for (size_t ll = 0; ll < dims[2]; ++ll, ++idx)
-                                {
-                                    IdxType l = offs[0] + jj;
-                                    IdxType s = offs[1] + kk;
-                                    IdxType r = offs[2] + ll;
-                                    Cplx prod = env[l] * hostbuf[idx];
-                                    if (s == 0)
-                                    {
-                                        env0[r] += prod;
-                                    }
-                                    else
-                                    {
-                                        env1[r] += prod;
-                                    }
-                                }
+                tamm::Scheduler alloc_sch{ec_local_};
+                for (auto& t : local_mps) {
+                    alloc_sch.allocate(t);
+                }
+                alloc_sch.execute(exec_hw);
+            }
+
+            for (IdxType site = 0; site < n_qubits; ++site) {
+                tamm::Scheduler copy_sch{ec_local_};
+                copy_sch(local_mps[site]() = mps_tensors[site]());
+                copy_sch.execute(exec_hw);
+            }
+
+            std::vector<LocalTensorView> local_views(n_qubits);
+            for (IdxType site = 0; site < n_qubits; ++site) {
+                auto& T_local = local_mps[site];
+                LocalTensorView view;
+                view.Dl = bond_dims[site];
+                view.Dr = bond_dims[site + 1];
+                const IdxType phys_dim = phys_dims[site];
+                if (phys_dim != 2) {
+                    throw std::runtime_error("MA_GATE expects qubit physical dimension of 2");
+                }
+                view.data.assign(static_cast<size_t>(view.Dl) * static_cast<size_t>(phys_dim) * static_cast<size_t>(view.Dr), Cplx{0.0, 0.0});
+
+                for (const auto& blockid : T_local.loop_nest()) {
+                    const size_t bs = T_local.block_size(blockid);
+                    std::vector<Cplx> hostbuf(bs);
+                    T_local.get(blockid, hostbuf);
+
+                    auto dims = T_local.block_dims(blockid);
+                    auto offs = T_local.block_offsets(blockid);
+                    size_t idx = 0;
+                    for (size_t l = 0; l < dims[0]; ++l) {
+                        for (size_t p = 0; p < dims[1]; ++p) {
+                            for (size_t r = 0; r < dims[2]; ++r, ++idx) {
+                                size_t L = static_cast<size_t>(offs[0] + l);
+                                size_t P = static_cast<size_t>(offs[1] + p);
+                                size_t R = static_cast<size_t>(offs[2] + r);
+                                size_t linear = (L * static_cast<size_t>(phys_dim) + P) * static_cast<size_t>(view.Dr) + R;
+                                view.data[linear] = hostbuf[idx];
                             }
                         }
                     }
-        
-                    // compute probabilities and sample outcome
+                }
+
+                local_views[site] = std::move(view);
+            }
+
+            {
+                tamm::Scheduler dealloc_sch{ec_local_};
+                for (auto& t : local_mps) {
+                    dealloc_sch.deallocate(t);
+                }
+                dealloc_sch.execute(exec_hw);
+            }
+
+            // compute per-rank repetition range
+            const int world_size = pg.size().value();
+            const int rank = pg.rank().value();
+            const IdxType base = repetition / static_cast<IdxType>(world_size);
+            const IdxType remainder = repetition % static_cast<IdxType>(world_size);
+            const IdxType local_count = base + (rank < remainder ? 1 : 0);
+
+            std::vector<IdxType> local_results;
+            local_results.resize(static_cast<size_t>(local_count), 0);
+
+            // RNG per rank
+            std::random_device rd;
+            std::mt19937_64 rng{rd() + static_cast<unsigned long long>(rank)};
+            std::uniform_real_distribution<double> dist(0.0, 1.0);
+
+            // preallocate branch buffers
+            std::vector<std::vector<Cplx>> branch0(n_qubits);
+            std::vector<std::vector<Cplx>> branch1(n_qubits);
+            for (IdxType site = 0; site < n_qubits; ++site) {
+                branch0[site].assign(static_cast<size_t>(local_views[site].Dr), Cplx{0.0, 0.0});
+                branch1[site].assign(static_cast<size_t>(local_views[site].Dr), Cplx{0.0, 0.0});
+            }
+
+            std::vector<Cplx> env;
+            env.reserve(static_cast<size_t>(max_bond_dim));
+
+            for (IdxType rep = 0; rep < local_count; ++rep) {
+                IdxType packed = 0;
+                env.assign(static_cast<size_t>(local_views[0].Dl), Cplx{0.0, 0.0});
+                if (!env.empty()) {
+                    env[0] = Cplx{1.0, 0.0};
+                }
+
+                for (IdxType site = 0; site < n_qubits; ++site) {
+                    const auto& view = local_views[site];
+                    const IdxType Dl = view.Dl;
+                    const IdxType Dr = view.Dr;
+                    const IdxType phys_dim = phys_dims[site];
+                    auto& env0 = branch0[site];
+                    auto& env1 = branch1[site];
+                    std::fill(env0.begin(), env0.end(), Cplx{0.0, 0.0});
+                    std::fill(env1.begin(), env1.end(), Cplx{0.0, 0.0});
+
+                    const Cplx* tensor_data = view.data.data();
+                    assert(env.size() >= static_cast<size_t>(Dl));
+                    assert(env0.size() == static_cast<size_t>(Dr));
+                    for (IdxType l = 0; l < Dl; ++l) {
+                        const Cplx env_l = env[l];
+                        const Cplx* base = tensor_data + static_cast<size_t>(l) * static_cast<size_t>(phys_dim) * static_cast<size_t>(Dr);
+                        for (IdxType r = 0; r < Dr; ++r) {
+                            env0[static_cast<size_t>(r)] += env_l * base[static_cast<size_t>(r)];
+                            env1[static_cast<size_t>(r)] += env_l * base[static_cast<size_t>(Dr) + static_cast<size_t>(r)];
+                        }
+                    }
+
                     long double w0 = 0.0L;
                     long double w1 = 0.0L;
-                    for (IdxType r = 0; r < Dr; ++r)
-                    {
-                        w0 += std::norm(env0[r]);
-                        w1 += std::norm(env1[r]);
+                    for (IdxType r = 0; r < Dr; ++r) {
+                        w0 += std::norm(env0[static_cast<size_t>(r)]);
+                        w1 += std::norm(env1[static_cast<size_t>(r)]);
                     }
-                    long double sumw = w0 + w1;
-                    long double p0 = sumw > 0.0L ? (w0 / sumw) : 0.0L;
-                    bool outcome1 = (dist(rng) >= static_cast<double>(p0));
-                    if (outcome1)
-                    {
+
+                    const long double sumw = w0 + w1;
+                    const long double p0 = sumw > 0.0L ? (w0 / sumw) : 0.0L;
+                    const bool outcome1 = (dist(rng) >= static_cast<double>(p0));
+                    if (outcome1) {
                         packed |= (IdxType(1) << site);
                     }
-        
-                    auto& chosen = outcome1 ? env1 : env0;
-                    long double norm_branch = outcome1 ? w1 : w0;
-                    long double invnorm = norm_branch > 0.0L
-                        ? (1.0L / std::sqrt(norm_branch))
-                        : 0.0L;
-                    env.assign(Dr, Cplx{0.0, 0.0});
-                    for (IdxType r = 0; r < Dr; ++r)
-                    {
-                        env[r] = chosen[r] * static_cast<Cplx>(invnorm);
+
+                    const auto& chosen = outcome1 ? env1 : env0;
+                    const long double norm_branch = outcome1 ? w1 : w0;
+                    const long double invnorm = norm_branch > 0.0L ? (1.0L / std::sqrt(norm_branch)) : 0.0L;
+
+                    env.resize(static_cast<size_t>(Dr));
+                    for (IdxType r = 0; r < Dr; ++r) {
+                        env[static_cast<size_t>(r)] = (invnorm > 0.0L)
+                            ? chosen[static_cast<size_t>(r)] * static_cast<double>(invnorm)
+                            : Cplx{0.0, 0.0};
                     }
                 }
-        
-                results[rep] = packed;
+
+                local_results[static_cast<size_t>(rep)] = packed;
             }
+
+            pg.barrier();
+
+            // gather all results so every rank holds the complete set
+            std::vector<int> recv_counts(world_size, 0);
+            std::vector<int> displs(world_size, 0);
+            for (int r = 0; r < world_size; ++r) {
+                const IdxType count_r = base + (r < remainder ? 1 : 0);
+                recv_counts[r] = static_cast<int>(count_r);
+                IdxType disp_r = base * static_cast<IdxType>(r) + std::min<IdxType>(static_cast<IdxType>(r), remainder);
+                displs[r] = static_cast<int>(disp_r);
+            }
+
+            std::vector<IdxType> gathered(static_cast<size_t>(repetition), 0);
+            MPI_Allgatherv(local_results.data(), static_cast<int>(local_count), MPI_LONG_LONG,
+                           gathered.data(), recv_counts.data(), displs.data(), MPI_LONG_LONG,
+                           pg.comm());
+
+            SAFE_FREE_HOST(results);
+            SAFE_ALOC_HOST(results, sizeof(IdxType) * static_cast<size_t>(repetition));
+            std::memcpy(results, gathered.data(), sizeof(IdxType) * static_cast<size_t>(repetition));
         }
 
         void local_left_step(IdxType i)
