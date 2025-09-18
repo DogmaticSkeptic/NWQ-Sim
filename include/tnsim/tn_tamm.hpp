@@ -880,7 +880,7 @@ namespace NWQSim
             std::vector<Cplx>& VT_row)
         {
             int rank = pg.rank().value();
-        
+
             // configure solver parameters
             cusolverDnXgesvdjSetTolerance(cu_ctx_.jp, 1e-3);
             cusolverDnXgesvdjSetMaxSweeps(cu_ctx_.jp, 5);
@@ -956,6 +956,106 @@ namespace NWQSim
             cudaFree(d_V);
             cudaFree(d_U);
             cudaFree(d_S);
+            cudaFree(d_A);
+        }
+
+        void gpu_thin_qr(
+            const Cplx* A_h, int m, int n,
+            std::vector<Cplx>& Q_row,
+            std::vector<Cplx>& R_row)
+        {
+            const int k = std::min(m, n);
+            if (k == 0 || m == 0 || n == 0)
+            {
+                Q_row.clear();
+                R_row.clear();
+                return;
+            }
+
+            cuDoubleComplex* d_A    = nullptr;
+            cuDoubleComplex* d_tau  = nullptr;
+            cuDoubleComplex* d_work = nullptr;
+            int*             d_info = nullptr;
+
+            cudaMalloc((void**)&d_A, sizeof(cuDoubleComplex) * (size_t)m * (size_t)n);
+            cudaMalloc((void**)&d_tau, sizeof(cuDoubleComplex) * (size_t)k);
+            cudaMalloc((void**)&d_info, sizeof(int));
+
+            cudaMemcpyAsync(d_A, reinterpret_cast<const cuDoubleComplex*>(A_h),
+                            sizeof(cuDoubleComplex) * (size_t)m * (size_t)n,
+                            cudaMemcpyHostToDevice, cu_ctx_.stream);
+
+            int lwork_geqrf = 0;
+            cusolverDnZgeqrf_bufferSize(cu_ctx_.solver, m, n, d_A, m, &lwork_geqrf);
+
+            int lwork_ungqr = 0;
+            cusolverDnZungqr_bufferSize(cu_ctx_.solver, m, k, k, d_A, m, d_tau, &lwork_ungqr);
+
+            const int lwork = std::max(lwork_geqrf, lwork_ungqr);
+            cudaMalloc((void**)&d_work, sizeof(cuDoubleComplex) * (size_t)lwork);
+
+            cusolverDnZgeqrf(cu_ctx_.solver, m, n, d_A, m, d_tau,
+                             d_work, lwork, d_info);
+            cudaStreamSynchronize(cu_ctx_.stream);
+
+            int info_host = 0;
+            cudaMemcpy(&info_host, d_info, sizeof(int), cudaMemcpyDeviceToHost);
+            if (info_host != 0)
+            {
+                cudaFree(d_work);
+                cudaFree(d_info);
+                cudaFree(d_tau);
+                cudaFree(d_A);
+                throw std::runtime_error("cusolverDnZgeqrf failed");
+            }
+
+            std::vector<Cplx> A_factored(static_cast<size_t>(m) * static_cast<size_t>(n));
+            cudaMemcpy(A_factored.data(), d_A,
+                       sizeof(Cplx) * static_cast<size_t>(m) * static_cast<size_t>(n),
+                       cudaMemcpyDeviceToHost);
+
+            cusolverDnZungqr(cu_ctx_.solver, m, k, k, d_A, m, d_tau,
+                             d_work, lwork, d_info);
+            cudaStreamSynchronize(cu_ctx_.stream);
+
+            cudaMemcpy(&info_host, d_info, sizeof(int), cudaMemcpyDeviceToHost);
+            if (info_host != 0)
+            {
+                cudaFree(d_work);
+                cudaFree(d_info);
+                cudaFree(d_tau);
+                cudaFree(d_A);
+                throw std::runtime_error("cusolverDnZungqr failed");
+            }
+
+            std::vector<Cplx> Q_col(static_cast<size_t>(m) * static_cast<size_t>(k));
+            cudaMemcpy(Q_col.data(), d_A,
+                       sizeof(Cplx) * static_cast<size_t>(m) * static_cast<size_t>(k),
+                       cudaMemcpyDeviceToHost);
+
+            Q_row.resize(static_cast<size_t>(m) * static_cast<size_t>(k));
+            for (int col = 0; col < k; ++col)
+            {
+                for (int row = 0; row < m; ++row)
+                {
+                    Q_row[static_cast<size_t>(row) * static_cast<size_t>(k) + static_cast<size_t>(col)] =
+                        Q_col[static_cast<size_t>(col) * static_cast<size_t>(m) + static_cast<size_t>(row)];
+                }
+            }
+
+            R_row.assign(static_cast<size_t>(k) * static_cast<size_t>(n), Cplx{0.0, 0.0});
+            for (int row = 0; row < k; ++row)
+            {
+                for (int col = row; col < n; ++col)
+                {
+                    R_row[static_cast<size_t>(row) * static_cast<size_t>(n) + static_cast<size_t>(col)] =
+                        A_factored[static_cast<size_t>(col) * static_cast<size_t>(m) + static_cast<size_t>(row)];
+                }
+            }
+
+            cudaFree(d_work);
+            cudaFree(d_info);
+            cudaFree(d_tau);
             cudaFree(d_A);
         }
 
@@ -1055,15 +1155,16 @@ namespace NWQSim
 
         void right_canonicalize(std::vector<tamm::Tensor<Cplx>> &MPS)
         {
-            // canonicalize MPS from right end toward left
             for (IdxType i = n_qubits - 1; i > 0; --i)
             {
-                // extract dimensions and assemble M matrix (column-major) for SVD
                 const IdxType Dl_old = bond_dims[i];
                 const IdxType Dr     = bond_dims[i + 1];
                 const IdxType d      = phys_dims[i];
                 const IdxType m_rows = Dl_old;
                 const IdxType n_cols = d * Dr;
+
+                if (m_rows == 0 || n_cols == 0) { continue; }
+
                 std::vector<Cplx> Mmat_col(static_cast<size_t>(m_rows) * static_cast<size_t>(n_cols), Cplx{0.0, 0.0});
                 {
                     auto& T = MPS[i];
@@ -1090,63 +1191,23 @@ namespace NWQSim
                     }
                 }
 
-                // perform SVD on GPU and determine truncation
-                std::vector<double> svals_vec;
-                std::vector<Cplx>  U_rowmajor;
-                std::vector<Cplx>  VT_rowmajor;
-                gpu_svd_jacobi(Mmat_col.data(), static_cast<int>(m_rows), static_cast<int>(n_cols),
-                               svals_vec, U_rowmajor, VT_rowmajor);
-
-                const IdxType sv_count = static_cast<IdxType>(svals_vec.size());
-                if (sv_count == 0) { continue; }
-
-                IdxType chi = std::min<IdxType>(sv_count, max_bond_dim);
-                if (chi == 0) chi = 1; // ensure non-zero bond dimension
-
-                std::vector<double> svals_keep(static_cast<size_t>(chi), 0.0);
-                for (IdxType k = 0; k < chi && k < sv_count; ++k)
+                std::vector<Cplx> Mmat_trans_col(static_cast<size_t>(n_cols) * static_cast<size_t>(m_rows), Cplx{0.0, 0.0});
+                for (IdxType col = 0; col < n_cols; ++col)
                 {
-                    svals_keep[static_cast<size_t>(k)] = svals_vec[static_cast<size_t>(k)];
-                }
-
-                const IdxType k_dim = std::min<IdxType>(m_rows, n_cols);
-
-                bond_dims[i] = chi;
-                {
-                    tamm::IndexSpace is_new{ tamm::range(chi) };
-                    bond_tis[i] = tamm::TiledIndexSpace(is_new, block_size);
-                }
-
-                // build updated tensor at site i from V^H (row-major)
-                tamm::Tensor<Cplx> Tnew({ bond_tis[i], phys_tis[i], bond_tis[i + 1] });
-                Tnew.set_dense();
-                Tnew.allocate(&ec);
-                {
-                    auto& T = Tnew;
-                    for (const auto& blockid : T.loop_nest())
+                    for (IdxType row = 0; row < m_rows; ++row)
                     {
-                        const size_t bs = T.block_size(blockid);
-                        std::vector<Cplx> hostbuf(bs);
-                        auto dims    = T.block_dims(blockid);
-                        auto offs    = T.block_offsets(blockid);
-                        size_t idx   = 0;
-                        for (size_t ll = offs[0]; ll < offs[0] + dims[0]; ++ll)
-                        {
-                            for (size_t pp = offs[1]; pp < offs[1] + dims[1]; ++pp)
-                            {
-                                for (size_t rr = offs[2]; rr < offs[2] + dims[2]; ++rr, ++idx)
-                                {
-                                    const size_t row = ll;
-                                    const size_t col = pp * static_cast<size_t>(Dr) + rr;
-                                    hostbuf[idx] = VT_rowmajor[row * static_cast<size_t>(n_cols) + col];
-                                }
-                            }
-                        }
-                        T.put(blockid, hostbuf);
+                        Mmat_trans_col[static_cast<size_t>(row) * static_cast<size_t>(n_cols) + static_cast<size_t>(col)] =
+                            Mmat_col[static_cast<size_t>(col) * static_cast<size_t>(m_rows) + static_cast<size_t>(row)];
                     }
                 }
 
-                // update left neighbor using U·S
+                std::vector<Cplx> Q_t_rowmajor;
+                std::vector<Cplx> R_t_rowmajor;
+                gpu_thin_qr(Mmat_trans_col.data(), static_cast<int>(n_cols), static_cast<int>(m_rows),
+                            Q_t_rowmajor, R_t_rowmajor);
+
+                const IdxType chi = static_cast<IdxType>(std::min(n_cols, m_rows));
+
                 const IdxType Dl_prev = bond_dims[i - 1];
                 const IdxType d_prev  = phys_dims[i - 1];
                 const IdxType rows_prev = Dl_prev * d_prev;
@@ -1177,15 +1238,57 @@ namespace NWQSim
                     }
                 }
 
-                std::vector<Cplx> US(static_cast<size_t>(Dl_old) * static_cast<size_t>(chi), Cplx{0.0, 0.0});
-                for (IdxType row = 0; row < Dl_old; ++row)
+                bond_dims[i] = chi;
+                {
+                    tamm::IndexSpace is_new{ tamm::range(chi) };
+                    bond_tis[i] = tamm::TiledIndexSpace(is_new, block_size);
+                }
+
+                std::vector<Cplx> Tnew_mat(static_cast<size_t>(chi) * static_cast<size_t>(n_cols), Cplx{0.0, 0.0});
+                for (IdxType row = 0; row < chi; ++row)
+                {
+                    for (IdxType col = 0; col < n_cols; ++col)
+                    {
+                        Tnew_mat[static_cast<size_t>(row) * static_cast<size_t>(n_cols) + static_cast<size_t>(col)] =
+                            Q_t_rowmajor[static_cast<size_t>(col) * static_cast<size_t>(chi) + static_cast<size_t>(row)];
+                    }
+                }
+
+                tamm::Tensor<Cplx> Tnew({ bond_tis[i], phys_tis[i], bond_tis[i + 1] });
+                Tnew.set_dense();
+                Tnew.allocate(&ec);
+                {
+                    auto& T = Tnew;
+                    for (const auto& blockid : T.loop_nest())
+                    {
+                        const size_t bs = T.block_size(blockid);
+                        std::vector<Cplx> hostbuf(bs);
+                        auto dims    = T.block_dims(blockid);
+                        auto offs    = T.block_offsets(blockid);
+                        size_t idx   = 0;
+                        for (size_t ll = offs[0]; ll < offs[0] + dims[0]; ++ll)
+                        {
+                            for (size_t pp = offs[1]; pp < offs[1] + dims[1]; ++pp)
+                            {
+                                for (size_t rr = offs[2]; rr < offs[2] + dims[2]; ++rr, ++idx)
+                                {
+                                    const size_t row = ll;
+                                    const size_t col = pp * static_cast<size_t>(Dr) + rr;
+                                    hostbuf[idx] = Tnew_mat[static_cast<size_t>(row) * static_cast<size_t>(n_cols) + static_cast<size_t>(col)];
+                                }
+                            }
+                        }
+                        T.put(blockid, hostbuf);
+                    }
+                }
+
+                std::vector<Cplx> R_transposed(static_cast<size_t>(m_rows) * static_cast<size_t>(chi), Cplx{0.0, 0.0});
+                for (IdxType row = 0; row < m_rows; ++row)
                 {
                     for (IdxType col = 0; col < chi; ++col)
                     {
-                        const size_t u_idx = static_cast<size_t>(row) * static_cast<size_t>(k_dim) + static_cast<size_t>(col);
-                        const double sval  = svals_keep[static_cast<size_t>(col)];
-                        US[static_cast<size_t>(row) * static_cast<size_t>(chi) + static_cast<size_t>(col)] =
-                            U_rowmajor[u_idx] * Cplx{sval, 0.0};
+                        R_transposed[static_cast<size_t>(row) * static_cast<size_t>(chi) + static_cast<size_t>(col)] =
+                            R_t_rowmajor[static_cast<size_t>(col) * static_cast<size_t>(m_rows) + static_cast<size_t>(row)];
                     }
                 }
 
@@ -1198,14 +1301,13 @@ namespace NWQSim
                         for (IdxType k = 0; k < Dl_old; ++k)
                         {
                             const Cplx a = Mprev[static_cast<size_t>(row) * static_cast<size_t>(Dl_old) + static_cast<size_t>(k)];
-                            const Cplx b = US[static_cast<size_t>(k) * static_cast<size_t>(chi) + static_cast<size_t>(col)];
+                            const Cplx b = R_transposed[static_cast<size_t>(k) * static_cast<size_t>(chi) + static_cast<size_t>(col)];
                             accum += a * b;
                         }
                         Mprev2[static_cast<size_t>(row) * static_cast<size_t>(chi) + static_cast<size_t>(col)] = accum;
                     }
                 }
 
-                // build updated left tensor from Mprev2
                 tamm::Tensor<Cplx> Tprev({ bond_tis[i - 1], phys_tis[i - 1], bond_tis[i] });
                 Tprev.set_dense();
                 Tprev.allocate(&ec);
@@ -1234,7 +1336,6 @@ namespace NWQSim
                     }
                 }
 
-                // replace tensors in MPS
                 MPS[i].deallocate();
                 MPS[i - 1].deallocate();
                 MPS[i]     = std::move(Tnew);
@@ -1246,12 +1347,14 @@ namespace NWQSim
         {
             for (IdxType i = 0; i < n_qubits - 1; ++i)
             {
-                // assemble matrix (column-major) from MPS[i]
                 const IdxType Dl     = bond_dims[i];
                 const IdxType Dr_old = bond_dims[i + 1];
                 const IdxType d      = phys_dims[i];
                 const IdxType m_rows = Dl * d;
                 const IdxType n_cols = Dr_old;
+
+                if (m_rows == 0 || n_cols == 0) { continue; }
+
                 std::vector<Cplx> Mmat_col(static_cast<size_t>(m_rows) * static_cast<size_t>(n_cols), Cplx{0.0, 0.0});
                 {
                     auto& T = MPS[i];
@@ -1279,28 +1382,13 @@ namespace NWQSim
                     }
                 }
 
-                // compute truncated SVD of Mmat on GPU
-                std::vector<double> svals_vec;
-                std::vector<Cplx>  U_rowmajor;
-                std::vector<Cplx>  VT_rowmajor;
-                gpu_svd_jacobi(Mmat_col.data(), static_cast<int>(m_rows), static_cast<int>(n_cols),
-                               svals_vec, U_rowmajor, VT_rowmajor);
+                std::vector<Cplx> Q_rowmajor;
+                std::vector<Cplx> R_rowmajor;
+                gpu_thin_qr(Mmat_col.data(), static_cast<int>(m_rows), static_cast<int>(n_cols),
+                            Q_rowmajor, R_rowmajor);
 
-                const IdxType sv_count = static_cast<IdxType>(svals_vec.size());
-                if (sv_count == 0) { continue; }
+                const IdxType chi = static_cast<IdxType>(std::min(m_rows, n_cols));
 
-                IdxType chi = std::min<IdxType>(sv_count, max_bond_dim);
-                if (chi == 0) chi = 1;
-
-                std::vector<double> svals_keep(static_cast<size_t>(chi), 0.0);
-                for (IdxType k = 0; k < chi && k < sv_count; ++k)
-                {
-                    svals_keep[static_cast<size_t>(k)] = svals_vec[static_cast<size_t>(k)];
-                }
-
-                const IdxType k_dim = std::min<IdxType>(m_rows, n_cols);
-
-                // gather right neighbor into row-major matrix before updating TIS
                 const IdxType d_next    = phys_dims[i + 1];
                 const IdxType Dr_right  = bond_dims[i + 2];
                 const size_t  cols_next = static_cast<size_t>(d_next) * static_cast<size_t>(Dr_right);
@@ -1331,14 +1419,12 @@ namespace NWQSim
                     }
                 }
 
-                // update bond dimension and index space
                 bond_dims[i + 1] = chi;
                 {
                     tamm::IndexSpace is_new{ tamm::range(chi) };
                     bond_tis[i + 1] = tamm::TiledIndexSpace(is_new, block_size);
                 }
 
-                // build new left tensor from left singular vectors
                 tamm::Tensor<Cplx> Tleft({ bond_tis[i], phys_tis[i], bond_tis[i + 1] });
                 Tleft.set_dense();
                 Tleft.allocate(&ec);
@@ -1357,25 +1443,12 @@ namespace NWQSim
                             for (size_t bb = offs[2]; bb < offs[2] + dims[2]; ++bb, ++idx)
                             {
                                 const size_t row = ll * static_cast<size_t>(d) + pp;
-                                hostbuf[idx] = U_rowmajor[row * static_cast<size_t>(k_dim) + bb];
+                                hostbuf[idx] = Q_rowmajor[row * static_cast<size_t>(chi) + bb];
                             }
                         }
                     }
 
                     Tleft.put(blockid, hostbuf);
-                }
-
-                // compute (S·V^H)
-                std::vector<Cplx> SVh(static_cast<size_t>(chi) * static_cast<size_t>(Dr_old), Cplx{0.0, 0.0});
-                for (IdxType row = 0; row < chi; ++row)
-                {
-                    const double sval = svals_keep[static_cast<size_t>(row)];
-                    for (IdxType col = 0; col < Dr_old; ++col)
-                    {
-                        const size_t idx_v = static_cast<size_t>(row) * static_cast<size_t>(n_cols) + static_cast<size_t>(col);
-                        SVh[static_cast<size_t>(row) * static_cast<size_t>(Dr_old) + static_cast<size_t>(col)] =
-                            VT_rowmajor[idx_v] * Cplx{sval, 0.0};
-                    }
                 }
 
                 std::vector<Cplx> Tnext_new_mat(static_cast<size_t>(chi) * cols_next, Cplx{0.0, 0.0});
@@ -1386,7 +1459,7 @@ namespace NWQSim
                         Cplx accum{0.0, 0.0};
                         for (IdxType k = 0; k < Dr_old; ++k)
                         {
-                            const Cplx a = SVh[static_cast<size_t>(row) * static_cast<size_t>(Dr_old) + static_cast<size_t>(k)];
+                            const Cplx a = R_rowmajor[static_cast<size_t>(row) * static_cast<size_t>(Dr_old) + static_cast<size_t>(k)];
                             const Cplx b = Tnext_mat_old[static_cast<size_t>(k) * cols_next + col];
                             accum += a * b;
                         }
@@ -1394,7 +1467,6 @@ namespace NWQSim
                     }
                 }
 
-                // write updated right tensor
                 tamm::Tensor<Cplx> Tnext({ bond_tis[i + 1], phys_tis[i + 1], bond_tis[i + 2] });
                 Tnext.set_dense();
                 Tnext.allocate(&ec);
@@ -1421,7 +1493,6 @@ namespace NWQSim
                     Tnext.put(blockid, hostbuf);
                 }
 
-                // replace tensors in MPS
                 MPS[i].deallocate();
                 MPS[i + 1].deallocate();
                 MPS[i]     = std::move(Tleft);
